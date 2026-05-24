@@ -185,7 +185,9 @@ def claim_issue(work_item_id: str, github_issue_number: int) -> dict:
         )
     result = {"work_item_id": work_item_id, "github_issue_number": github_issue_number,
               "status": "claimed"}
-    log_audit("claim_issue", result=result, work_item_id=work_item_id)
+    log_audit("claim_issue",
+              args={"work_item_id": work_item_id, "github_issue_number": github_issue_number},
+              result=result, agent_id=row["agent_id"], work_item_id=work_item_id)
     return result
 
 
@@ -223,7 +225,9 @@ def claim_new(work_item_id: str, body: str = "", labels: list[str] | None = None
         )
     result = {"work_item_id": work_item_id, "github_issue_number": issue_number,
               "url": url, "status": "claimed"}
-    log_audit("claim_new", result=result, work_item_id=work_item_id)
+    log_audit("claim_new",
+              args={"work_item_id": work_item_id, "labels": labels, "body_preview": (body or "")[:80]},
+              result=result, agent_id=row["agent_id"], work_item_id=work_item_id)
     return result
 
 

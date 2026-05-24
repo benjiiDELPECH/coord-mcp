@@ -108,7 +108,10 @@ def checkout(
         "blockers": blockers,
         "status": "checked_out",
     }
-    log_audit("checkout", result=result, work_item_id=work_item_id, agent_id=item.get("agent_id"))
+    log_audit("checkout",
+              args={"work_item_id": work_item_id, "auto_detect_diff": auto_detect_diff,
+                    "diff_files_count": len(diff_files)},
+              result=result, work_item_id=work_item_id, agent_id=item.get("agent_id"))
     return result
 
 
@@ -145,13 +148,17 @@ def release(
         "github_issue_closed": closed,
         "outcome": outcome[:200],
     }
-    log_audit("release", result=result, work_item_id=work_item_id, agent_id=item.get("agent_id"))
+    log_audit("release",
+              args={"work_item_id": work_item_id, "close_github_issue": close_github_issue,
+                    "outcome_preview": (outcome or "")[:120]},
+              result=result, work_item_id=work_item_id, agent_id=item.get("agent_id"))
     return result
 
 
 def abandon(work_item_id: str, reason: str = "") -> dict:
     """Mark a work item as abandoned (declared but never claimed/done)."""
     with connection() as conn:
+        row = conn.execute("SELECT agent_id FROM work_items WHERE id = ?", (work_item_id,)).fetchone()
         cur = conn.execute(
             "UPDATE work_items SET status='abandoned', outcome=?, updated_at=? WHERE id=?",
             (f"abandoned: {reason}", now_iso(), work_item_id),
@@ -159,7 +166,10 @@ def abandon(work_item_id: str, reason: str = "") -> dict:
     if cur.rowcount == 0:
         return {"error": f"work_item {work_item_id} not found"}
     result = {"work_item_id": work_item_id, "status": "abandoned", "reason": reason}
-    log_audit("abandon", result=result, work_item_id=work_item_id)
+    log_audit("abandon",
+              args={"work_item_id": work_item_id, "reason": reason},
+              result=result, work_item_id=work_item_id,
+              agent_id=row["agent_id"] if row else None)
     return result
 
 
