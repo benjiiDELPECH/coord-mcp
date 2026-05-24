@@ -47,6 +47,39 @@ def _gh(args: list[str], json_out: bool = True) -> dict | list | str | None:
         return None
 
 
+def _gh_with_stderr(args: list[str]) -> tuple[int, str, str]:
+    """Run `gh` CLI and return (returncode, stdout, stderr). For error reporting."""
+    try:
+        result = subprocess.run(
+            ["gh"] + args,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", "gh command timed out after 20s"
+    except FileNotFoundError:
+        return 127, "", "gh CLI not found in PATH"
+
+
+def _resolve_milestone_title(repo_slug: str, milestone_number: int) -> str | None:
+    """Resolve a milestone number to its title via the GitHub API.
+
+    The `gh issue create --milestone <X>` flag expects the milestone **title**, not
+    the number. We must resolve number → title before invoking `gh issue create`.
+    Returns None if the milestone doesn't exist or the API call fails.
+    """
+    title = _gh(
+        ["api", f"repos/{repo_slug}/milestones/{milestone_number}", "--jq", ".title"],
+        json_out=False,
+    )
+    if not isinstance(title, str):
+        return None
+    title = title.strip()
+    return title or None
+
+
 def _detect_repo_slug(repo_path: str) -> str | None:
     """Get owner/repo from `gh repo view` for the given dir."""
     result = subprocess.run(
@@ -204,14 +237,32 @@ def claim_new(work_item_id: str, body: str = "", labels: list[str] | None = None
         args = ["issue", "create", "--repo", repo_slug,
                 "--title", row["title"], "--body", body or _default_body(row)]
         if row["milestone_number"]:
-            args += ["--milestone", str(row["milestone_number"])]
+            # `gh issue create --milestone` expects the milestone TITLE, not its number.
+            # Resolve it lazily here so we don't need a SQLite migration. If the milestone
+            # doesn't exist on the remote, surface an explicit error instead of letting
+            # `gh issue create` fail opaquely.
+            milestone_title = _resolve_milestone_title(repo_slug, row["milestone_number"])
+            if milestone_title is None:
+                return {
+                    "error": (
+                        f"milestone #{row['milestone_number']} not found in {repo_slug} "
+                        f"(checkin recorded a milestone number that doesn't resolve to a "
+                        f"title via GitHub API)"
+                    )
+                }
+            args += ["--milestone", milestone_title]
         if labels:
             for lbl in labels:
                 args += ["--label", lbl]
 
-        out = _gh(args, json_out=False)
-        if not out:
-            return {"error": "gh issue create failed"}
+        rc, stdout, stderr = _gh_with_stderr(args)
+        if rc != 0:
+            return {
+                "error": "gh issue create failed",
+                "stderr": (stderr or "").strip()[:500],
+                "returncode": rc,
+            }
+        out = stdout
         # `gh issue create` returns the URL on stdout
         url = out.strip().splitlines()[-1] if out else ""
         try:
