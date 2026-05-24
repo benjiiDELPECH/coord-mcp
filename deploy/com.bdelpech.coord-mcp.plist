@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bdelpech.coord-mcp</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/bdelpech/dev/github/coord-mcp/.venv/bin/python</string>
+        <string>-m</string>
+        <string>src.server</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/bdelpech/dev/github/coord-mcp</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/coord-mcp.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/coord-mcp.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/bdelpech</string>
+        <key>PATH</key>
+        <string>/Users/bdelpech/dev/github/coord-mcp/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
