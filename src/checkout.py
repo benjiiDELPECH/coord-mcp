@@ -28,8 +28,18 @@ def checkout(
     work_item_id: str,
     diff_files: list[str] | None = None,
     auto_detect_diff: bool = True,
+    worktree_path: str | None = None,
 ) -> dict:
-    """Arrival gate: validate scope match, detect parallel conflicts, list AC."""
+    """Arrival gate: validate scope match, detect parallel conflicts, list AC.
+
+    Auto-detection cascade (when diff_files is None and auto_detect_diff):
+      1. Explicit `worktree_path` param (escape hatch) → use it as cwd.
+      2. Scope-matching worktree: iterate `git worktree list`, return the
+         worktree whose diff vs origin/main best overlaps declared scope.
+         Resolves #4 (HEAD ambigu when working in dedicated worktrees).
+      3. Fallback to repo_path HEAD (original behaviour). Emits an explicit
+         warning if HEAD == origin/main (resolves #2: empty diff is suspicious).
+    """
     with connection() as conn:
         row = conn.execute("SELECT * FROM work_items WHERE id = ?", (work_item_id,)).fetchone()
     if not row:
@@ -40,13 +50,19 @@ def checkout(
     repo_path = item["repo"]
     repo_slug = _detect_repo_slug(repo_path)
 
-    if diff_files is None and auto_detect_diff:
-        diff_files = _git_diff_files(repo_path)
-    diff_files = diff_files or []
-    actual = set(diff_files)
-
     warnings: list[str] = []
     blockers: list[str] = []
+    diff_source = "explicit"  # explicit | worktree-override | scope-match | repo-fallback
+
+    if diff_files is None and auto_detect_diff:
+        diff_files, diff_source, detection_warnings = _auto_detect_diff_files(
+            repo_path=repo_path,
+            declared_files=declared,
+            worktree_path_override=worktree_path,
+        )
+        warnings.extend(detection_warnings)
+    diff_files = diff_files or []
+    actual = set(diff_files)
 
     # 1. Scope mismatch
     out_of_scope = actual - declared if declared else set()
@@ -99,6 +115,7 @@ def checkout(
         "ready_to_merge": ready_to_merge,
         "declared_files": sorted(declared),
         "actual_diff_files": sorted(actual),
+        "diff_source": diff_source,
         "out_of_scope_count": len(out_of_scope),
         "untouched_declared_count": len(missed),
         "parallel_conflicts": parallel_conflicts,
@@ -110,7 +127,9 @@ def checkout(
     }
     log_audit("checkout",
               args={"work_item_id": work_item_id, "auto_detect_diff": auto_detect_diff,
-                    "diff_files_count": len(diff_files)},
+                    "diff_files_count": len(diff_files),
+                    "worktree_path_override": worktree_path,
+                    "diff_source": diff_source},
               result=result, work_item_id=work_item_id, agent_id=item.get("agent_id"))
     return result
 
@@ -177,7 +196,11 @@ def abandon(work_item_id: str, reason: str = "") -> dict:
 
 
 def _git_diff_files(repo_path: str) -> list[str]:
-    """Files changed vs origin/main (fallback: vs HEAD~1)."""
+    """Files changed vs origin/main (fallback: vs HEAD~1, then staged+unstaged).
+
+    Returns empty list if no changes found at any layer (caller should warn
+    if this is unexpected — see issue #2).
+    """
     for cmd in (
         ["git", "diff", "--name-only", "origin/main...HEAD"],
         ["git", "diff", "--name-only", "HEAD~1"],
@@ -187,6 +210,131 @@ def _git_diff_files(repo_path: str) -> list[str]:
         if result.returncode == 0 and result.stdout.strip():
             return [f for f in result.stdout.strip().splitlines() if f]
     return []
+
+
+def _list_worktrees(repo_path: str) -> list[dict]:
+    """Return worktrees attached to this repo via `git worktree list --porcelain`.
+
+    Output: [{"path": str, "branch": str | None, "head": str}, ...]. Empty on error.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, cwd=repo_path, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        return []
+    if result.returncode != 0:
+        return []
+
+    worktrees: list[dict] = []
+    current: dict = {}
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if current.get("path"):
+                worktrees.append(current)
+            current = {}
+            continue
+        if line.startswith("worktree "):
+            current["path"] = line.removeprefix("worktree ").strip()
+        elif line.startswith("HEAD "):
+            current["head"] = line.removeprefix("HEAD ").strip()
+        elif line.startswith("branch "):
+            ref = line.removeprefix("branch ").strip()
+            current["branch"] = ref.removeprefix("refs/heads/")
+        elif line == "detached":
+            current["branch"] = None
+    if current.get("path"):
+        worktrees.append(current)
+    return worktrees
+
+
+def _head_is_origin_main(repo_path: str) -> bool:
+    """True iff HEAD of `repo_path` points to the same commit as origin/main.
+
+    Used to emit a warning when auto-detect returns an empty diff because the
+    user is sitting on `main` directly (resolves #2).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-list", "--count", "origin/main...HEAD"],
+            capture_output=True, text=True, cwd=repo_path, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        return False
+    if result.returncode != 0:
+        return False
+    # rev-list --count A...B returns commits unique to either side; 0 = same commit.
+    return result.stdout.strip() == "0"
+
+
+def _find_worktree_matching_scope(
+    repo_path: str,
+    declared_files: set[str],
+) -> tuple[str | None, int]:
+    """Return (best_path, overlap_count) — worktree whose diff overlaps declared_files most.
+
+    Returns (None, 0) if no worktree overlaps at all, or if declared_files is empty.
+    """
+    if not declared_files:
+        return None, 0
+
+    best_path: str | None = None
+    best_overlap = 0
+    for wt in _list_worktrees(repo_path):
+        wt_path = wt.get("path")
+        if not wt_path:
+            continue
+        wt_diff = set(_git_diff_files(wt_path))
+        overlap = len(wt_diff & declared_files)
+        if overlap > best_overlap:
+            best_path, best_overlap = wt_path, overlap
+    return best_path, best_overlap
+
+
+def _auto_detect_diff_files(
+    repo_path: str,
+    declared_files: set[str],
+    worktree_path_override: str | None = None,
+) -> tuple[list[str], str, list[str]]:
+    """Cascade: explicit override → scope-matching worktree → repo HEAD fallback.
+
+    Returns (diff_files, diff_source, warnings).
+    diff_source ∈ {"worktree-override", "scope-match", "repo-fallback"}.
+    """
+    warnings: list[str] = []
+
+    # 1. Explicit override (escape hatch — power user, exotic setup).
+    if worktree_path_override:
+        return _git_diff_files(worktree_path_override), "worktree-override", warnings
+
+    # 2. Scope-matching worktree (resolves #4 — multi-worktree workflow).
+    matched_path, _overlap = _find_worktree_matching_scope(repo_path, declared_files)
+    if matched_path and matched_path != repo_path:
+        return _git_diff_files(matched_path), "scope-match", warnings
+
+    # 3. Fallback: HEAD of the declared repo_path (original behaviour).
+    diff = _git_diff_files(repo_path)
+
+    # Issue #2 — warn if empty diff because we're sitting on origin/main.
+    if not diff and _head_is_origin_main(repo_path):
+        warnings.append(
+            "HEAD of repo_path is at origin/main (no commits ahead) — diff is empty. "
+            "If you expect changes, pass `diff_files` explicitly or commit/checkout "
+            "to the feature branch first."
+        )
+
+    # Issue #4 (defensive) — declared scope given but fallback HEAD produced
+    # nothing matching it → user is probably in another worktree.
+    if declared_files and diff and not (declared_files & set(diff)):
+        warnings.append(
+            f"HEAD of repo_path produced a diff ({len(diff)} files) but NONE overlap "
+            f"declared_files. You may be checking out from the wrong worktree — "
+            f"consider passing `worktree_path` explicitly."
+        )
+
+    return diff, "repo-fallback", warnings
 
 
 def _find_open_prs_on_files(repo_slug: str, files: list[str]) -> list[dict]:

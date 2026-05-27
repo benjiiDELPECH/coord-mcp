@@ -103,17 +103,28 @@ def checkout_work(
     work_item_id: str,
     diff_files: list[str] | None = None,
     auto_detect_diff: bool = True,
+    worktree_path: str | None = None,
 ) -> dict[str, Any]:
     """Arrival gate before merge. Validates scope match, detects parallel conflicts.
 
     Returns ready_to_merge: bool, warnings: [...], blockers: [...],
     acceptance_criteria_status: {total, checked, unchecked, all_checked},
-    open_pr_conflicts_on_files.
+    open_pr_conflicts_on_files, diff_source.
 
-    If auto_detect_diff=True (default), runs `git diff --name-only origin/main...HEAD`
-    in the work item's repo to get actual changes.
+    Auto-detection cascade when `diff_files is None and auto_detect_diff`:
+      1. `worktree_path` (explicit override — escape hatch).
+      2. Scope-matching worktree (iterates `git worktree list`, picks the one
+         whose diff vs `origin/main` best overlaps declared scope_files).
+         Required for multi-worktree workflows (cf. coord-mcp#4).
+      3. Fallback to repo_path HEAD (original behaviour). Emits a warning if
+         HEAD == origin/main and diff is empty (cf. coord-mcp#2).
     """
-    return checkout(work_item_id, diff_files=diff_files, auto_detect_diff=auto_detect_diff)
+    return checkout(
+        work_item_id,
+        diff_files=diff_files,
+        auto_detect_diff=auto_detect_diff,
+        worktree_path=worktree_path,
+    )
 
 
 @mcp.tool()
