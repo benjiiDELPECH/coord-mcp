@@ -107,13 +107,14 @@ def test_find_worktree_matching_scope_picks_best_overlap():
         "/c": {"diff --name-only origin/main...HEAD": (0, "a.py\n")},
     })
     with patch("src.checkout.subprocess.run", side_effect=mock):
-        best_path, overlap = _find_worktree_matching_scope(
+        best_path, overlap, ambiguous = _find_worktree_matching_scope(
             repo_path="/a",
             declared_files={"a.py", "b.py", "c.py"},
         )
 
     assert best_path == "/b"
     assert overlap == 2
+    assert ambiguous == []
 
 
 def test_find_worktree_matching_scope_returns_none_if_no_overlap():
@@ -127,13 +128,14 @@ def test_find_worktree_matching_scope_returns_none_if_no_overlap():
         },
     })
     with patch("src.checkout.subprocess.run", side_effect=mock):
-        best_path, overlap = _find_worktree_matching_scope(
+        best_path, overlap, ambiguous = _find_worktree_matching_scope(
             repo_path="/a",
             declared_files={"src/a.py"},
         )
 
     assert best_path is None
     assert overlap == 0
+    assert ambiguous == []
 
 
 def test_find_worktree_matching_scope_empty_declared_returns_none():
@@ -142,13 +144,115 @@ def test_find_worktree_matching_scope_empty_declared_returns_none():
     with patch("src.checkout.subprocess.run") as m:
         m.return_value.returncode = 0
         m.return_value.stdout = ""
-        best_path, overlap = _find_worktree_matching_scope(
+        best_path, overlap, ambiguous = _find_worktree_matching_scope(
             repo_path="/a",
             declared_files=set(),
         )
 
     assert best_path is None
     assert overlap == 0
+    assert ambiguous == []
+
+
+def test_find_worktree_matching_scope_reports_tied_candidates():
+    """B4 fix: deterministic tie handling — return (None, count, candidates)."""
+    from src.checkout import _find_worktree_matching_scope
+
+    porcelain = (
+        "worktree /a\nHEAD aaa\nbranch refs/heads/m\n\n"
+        "worktree /b\nHEAD bbb\nbranch refs/heads/x\n\n"
+        "worktree /c\nHEAD ccc\nbranch refs/heads/y\n\n"
+    )
+    mock = _make_mock_run({
+        "/a": {
+            "worktree list --porcelain": (0, porcelain),
+            "diff --name-only origin/main...HEAD": (0, "docs/unrelated.md\n"),
+        },
+        # Both /b and /c overlap with exactly 1 file from declared scope.
+        "/b": {"diff --name-only origin/main...HEAD": (0, "a.py\n")},
+        "/c": {"diff --name-only origin/main...HEAD": (0, "b.py\n")},
+    })
+    with patch("src.checkout.subprocess.run", side_effect=mock):
+        best_path, overlap, ambiguous = _find_worktree_matching_scope(
+            repo_path="/a",
+            declared_files={"a.py", "b.py"},
+        )
+
+    assert best_path is None, "tied scenario MUST NOT silently pick one"
+    assert overlap == 1
+    assert ambiguous == ["/b", "/c"], "ambiguous candidates returned sorted"
+
+
+def test_git_diff_files_returns_empty_on_oserror():
+    """B3 fix: missing git binary / broken cwd MUST NOT crash."""
+    from src.checkout import _git_diff_files
+
+    with patch(
+        "src.checkout.subprocess.run",
+        side_effect=FileNotFoundError("git: command not found"),
+    ):
+        result = _git_diff_files("/nonexistent")
+
+    assert result == []
+
+
+def test_git_diff_files_returns_empty_on_timeout():
+    """B3 fix: subprocess TimeoutExpired (NFS hang) MUST NOT propagate."""
+    import subprocess as sp
+    from src.checkout import _git_diff_files
+
+    with patch(
+        "src.checkout.subprocess.run",
+        side_effect=sp.TimeoutExpired(cmd="git", timeout=10),
+    ):
+        result = _git_diff_files("/dead-nfs-mount")
+
+    assert result == []
+
+
+def test_find_worktree_matching_scope_survives_one_dead_worktree():
+    """B3 fix: one bad worktree (NFS dead) MUST NOT crash the whole scan."""
+    from src.checkout import _find_worktree_matching_scope
+
+    porcelain = (
+        "worktree /healthy\nHEAD aaa\nbranch refs/heads/x\n\n"
+        "worktree /dead\nHEAD bbb\nbranch refs/heads/y\n\n"
+    )
+
+    def _run(cmd, **kwargs):
+        cwd = kwargs.get("cwd", "")
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        if "worktree list" in cmd_str:
+            m = MagicMock()
+            m.returncode = 0
+            m.stdout = porcelain
+            m.stderr = ""
+            return m
+        if cwd == "/dead":
+            # Simulate NFS hang on every git call from this worktree.
+            raise FileNotFoundError("Stale NFS file handle")
+        if cwd == "/healthy" and "diff --name-only origin/main...HEAD" in cmd_str:
+            m = MagicMock()
+            m.returncode = 0
+            m.stdout = "src/checkout.py\n"
+            m.stderr = ""
+            return m
+        m = MagicMock()
+        m.returncode = 0
+        m.stdout = ""
+        m.stderr = ""
+        return m
+
+    with patch("src.checkout.subprocess.run", side_effect=_run):
+        best_path, overlap, ambiguous = _find_worktree_matching_scope(
+            repo_path="/healthy",
+            declared_files={"src/checkout.py"},
+        )
+
+    # /dead was silently skipped (empty diff after exception), /healthy wins.
+    assert best_path == "/healthy"
+    assert overlap == 1
+    assert ambiguous == []
 
 
 # ────────────────────────────────────────────────────────────────────
