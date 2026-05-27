@@ -207,15 +207,27 @@ def abandon(work_item_id: str, reason: str = "") -> dict:
 def _git_diff_files(repo_path: str) -> list[str]:
     """Files changed vs origin/main (fallback: vs HEAD~1, then staged+unstaged).
 
-    Returns empty list if no changes found at any layer (caller should warn
-    if this is unexpected — see issue #2).
+    Returns empty list if no changes found at any layer, or if git fails for
+    any reason (missing binary, stale NFS, non-git dir, timeout, etc.).
+    Caller should warn if empty diff is unexpected — see issue #2.
+
+    Safety: this function is called N times per `checkout()` when iterating
+    worktrees (see `_find_worktree_matching_scope`). A single bad worktree
+    (dead NFS mount, broken symlink, missing git) MUST NOT crash the whole
+    cascade — hence the broad try/except wrapping `subprocess.run`.
     """
     for cmd in (
         ["git", "diff", "--name-only", "origin/main...HEAD"],
         ["git", "diff", "--name-only", "HEAD~1"],
         ["git", "diff", "--name-only"],
     ):
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_path, timeout=10)
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, cwd=repo_path, timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+            # One layer failed (binary missing, cwd gone, timeout) — try next.
+            continue
         if result.returncode == 0 and result.stdout.strip():
             return [f for f in result.stdout.strip().splitlines() if f]
     return []
@@ -281,25 +293,43 @@ def _head_is_origin_main(repo_path: str) -> bool:
 def _find_worktree_matching_scope(
     repo_path: str,
     declared_files: set[str],
-) -> tuple[str | None, int]:
-    """Return (best_path, overlap_count) — worktree whose diff overlaps declared_files most.
+) -> tuple[str | None, int, list[str]]:
+    """Return (best_path, overlap_count, ambiguous_candidates).
 
-    Returns (None, 0) if no worktree overlaps at all, or if declared_files is empty.
+    Three cases:
+      - **Unique best**:   (path, count, [])             — single winner
+      - **Tied best**:     (None, count, sorted([paths])) — multiple at same overlap
+      - **No overlap**:    (None, 0, [])                 — nothing matched
+      - **Empty declared**: (None, 0, [])                — can't match
+
+    Tie detection is intentional: `git worktree list` order is
+    filesystem-dependent (creation order on most FS, not guaranteed). Silently
+    picking the first would produce "works on my machine" bugs. Caller is
+    expected to surface the ambiguity as a warning and fall through to
+    `repo-fallback`.
     """
     if not declared_files:
-        return None, 0
+        return None, 0, []
 
-    best_path: str | None = None
-    best_overlap = 0
+    candidates: list[tuple[str, int]] = []
     for wt in _list_worktrees(repo_path):
         wt_path = wt.get("path")
         if not wt_path:
             continue
         wt_diff = set(_git_diff_files(wt_path))
         overlap = len(wt_diff & declared_files)
-        if overlap > best_overlap:
-            best_path, best_overlap = wt_path, overlap
-    return best_path, best_overlap
+        if overlap > 0:
+            candidates.append((wt_path, overlap))
+
+    if not candidates:
+        return None, 0, []
+
+    max_overlap = max(c[1] for c in candidates)
+    tied = sorted(path for path, ov in candidates if ov == max_overlap)
+
+    if len(tied) == 1:
+        return tied[0], max_overlap, []
+    return None, max_overlap, tied
 
 
 def _auto_detect_diff_files(
@@ -319,9 +349,19 @@ def _auto_detect_diff_files(
         return _git_diff_files(worktree_path_override), "worktree-override", warnings
 
     # 2. Scope-matching worktree (resolves #4 — multi-worktree workflow).
-    matched_path, _overlap = _find_worktree_matching_scope(repo_path, declared_files)
+    matched_path, max_overlap, ambiguous = _find_worktree_matching_scope(
+        repo_path, declared_files,
+    )
     if matched_path and matched_path != repo_path:
         return _git_diff_files(matched_path), "scope-match", warnings
+    # Tie detected — multiple worktrees overlap declared scope equally.
+    # Fall through to repo-fallback with explicit warning naming the candidates.
+    if ambiguous:
+        warnings.append(
+            f"Multiple worktrees tie for declared scope overlap ({max_overlap} "
+            f"file(s) each): {ambiguous}. Pass `worktree_path` explicitly to "
+            f"disambiguate. Falling back to repo_path HEAD."
+        )
 
     # 3. Fallback: HEAD of the declared repo_path (original behaviour).
     diff = _git_diff_files(repo_path)
