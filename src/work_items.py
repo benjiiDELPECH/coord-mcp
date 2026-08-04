@@ -242,6 +242,39 @@ def _suggest_action(conflicts: list[dict], similar: list[dict], graphiti_nodes: 
     return "CREATE_NEW — no conflicts, no similar work, safe to create new issue"
 
 
+def relink_issue(work_item_id: str, issue_number: int, note: str = "") -> dict:
+    """Repoint an existing work item's issue reference without touching status.
+
+    Unlike claim_issue/claim_new, this does NOT call `gh` and does NOT change
+    status — it exists for platform migrations (e.g. GitHub -> Forgejo) where
+    the issue content already exists elsewhere under a new number and the
+    work_item row just needs its `github_issue_number` column corrected.
+
+    The column is named github_issue_number for historical/schema reasons but
+    is treated as a platform-agnostic issue number as of the 04.08.2026
+    GitHub -> Forgejo migration (git.delpech.dev is canonical).
+    """
+    with connection() as conn:
+        row = conn.execute("SELECT * FROM work_items WHERE id = ?", (work_item_id,)).fetchone()
+        if not row:
+            return {"error": f"work_item {work_item_id} not found"}
+        old_number = row["github_issue_number"]
+        conn.execute(
+            "UPDATE work_items SET github_issue_number=?, updated_at=? WHERE id=?",
+            (issue_number, now_iso(), work_item_id),
+        )
+    result = {
+        "work_item_id": work_item_id,
+        "old_issue_number": old_number,
+        "new_issue_number": issue_number,
+        "note": note,
+    }
+    log_audit("relink_issue",
+              args={"work_item_id": work_item_id, "issue_number": issue_number, "note": note},
+              result=result, agent_id=row["agent_id"], work_item_id=work_item_id)
+    return result
+
+
 def claim_issue(work_item_id: str, github_issue_number: int) -> dict:
     """Bind a work item to an existing GitHub issue (assignee = current user)."""
     with connection() as conn:

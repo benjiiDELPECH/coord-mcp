@@ -32,6 +32,7 @@ from .work_items import (
     claim_new as _claim_new,
     get_work_item,
     list_active_work as _list_active_work,
+    relink_issue as _relink_issue,
 )
 
 
@@ -148,6 +149,16 @@ def release_work(
 def abandon_work(work_item_id: str, reason: str = "") -> dict[str, Any]:
     """Mark a declared/claimed work item as abandoned (e.g. user changed mind)."""
     return abandon(work_item_id, reason=reason)
+
+
+@mcp.tool()
+def relink_issue(work_item_id: str, issue_number: int, note: str = "") -> dict[str, Any]:
+    """Repoint a work item's issue_number without touching status or calling gh.
+
+    For platform migrations (e.g. GitHub -> Forgejo, 04.08.2026) where the issue
+    content already exists elsewhere under a new number.
+    """
+    return _relink_issue(work_item_id, issue_number, note=note)
 
 
 # ── Visibility ───────────────────────────────────────────────────────
