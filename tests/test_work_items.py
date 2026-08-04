@@ -202,3 +202,39 @@ def test_claim_new_surfaces_stderr_on_gh_failure(temp_db):
     assert "stderr" in claim_result
     assert "Label 'unknown' not found" in claim_result["stderr"]
     assert claim_result["returncode"] == 1
+
+
+def test_relink_issue_repoints_number_without_gh_or_status_change(temp_db):
+    """relink_issue must update github_issue_number only — no gh call, no status change."""
+    _db, wi = temp_db
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "repo", "view"]:
+            return _fake_completed(stdout=json.dumps({"nameWithOwner": "owner/repo"}))
+        if cmd[:3] == ["gh", "issue", "list"]:
+            return _fake_completed(stdout="[]")
+        raise AssertionError(f"unexpected subprocess.run call: {cmd}")
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        checkin_result = wi.checkin(repo_path=".", title="Migrated item", agent_id="test-agent")
+    work_item_id = checkin_result["work_item_id"]
+
+    def fail_run(cmd, **kwargs):
+        raise AssertionError(f"relink_issue must never call subprocess: {cmd}")
+
+    with patch.object(subprocess, "run", side_effect=fail_run):
+        result = wi.relink_issue(work_item_id, issue_number=257, note="GitHub -> Forgejo migration")
+
+    assert result["work_item_id"] == work_item_id
+    assert result["old_issue_number"] is None
+    assert result["new_issue_number"] == 257
+
+    row = wi.get_work_item(work_item_id)
+    assert row["github_issue_number"] == 257
+    assert row["status"] == "declared"  # unchanged
+
+
+def test_relink_issue_unknown_work_item_returns_error(temp_db):
+    _db, wi = temp_db
+    result = wi.relink_issue("wi_doesnotexist", issue_number=1)
+    assert "error" in result
