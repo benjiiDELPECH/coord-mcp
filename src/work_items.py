@@ -6,7 +6,9 @@ Each work item models a unit of agent activity. Lifecycle:
     declared → claimed → in_progress → checked_out → released
                                                      └─→ abandoned
 
-Conflict detection on checkin = overlap on `scope_files` with other active items.
+Conflict detection on checkin = overlap on `scope_files` with other active items,
+unioned with the GitNexus blast-radius of any declared `scope_symbols` (best-effort —
+falls back to file-path-only matching if GitNexus is unavailable or the repo isn't indexed).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
+from . import gitnexus_bridge
 from .db import connection, log_audit, now_iso
 
 
@@ -98,7 +101,13 @@ def _detect_repo_slug(repo_path: str) -> str | None:
 
 
 def _find_conflicts(repo: str, scope_files: list[str]) -> list[dict]:
-    """Return active work items in the same repo with overlapping scope_files."""
+    """Return active work items in the same repo with overlapping scope.
+
+    `scope_files` here is already the caller's declared files UNIONED with the
+    GitNexus-expanded impact of their declared symbols (see `checkin`). Each
+    candidate's own scope is expanded the same way (scope_files ∪ scope_symbols_expanded)
+    before comparing, so a semantic conflict is caught on either side.
+    """
     if not scope_files:
         return []
     scope_set = set(scope_files)
@@ -109,8 +118,9 @@ def _find_conflicts(repo: str, scope_files: list[str]) -> list[dict]:
             (repo, *ACTIVE_STATUSES),
         ).fetchall()
     for row in rows:
-        other_files = json.loads(row["scope_files"] or "[]")
-        overlap = scope_set & set(other_files)
+        other_files = set(json.loads(row["scope_files"] or "[]"))
+        other_files |= set(json.loads(row["scope_symbols_expanded"] or "[]"))
+        overlap = scope_set & other_files
         if overlap:
             conflicts.append({
                 "work_item_id": row["id"],
@@ -143,12 +153,20 @@ def checkin(
     repo_path: str,
     title: str,
     scope_files: list[str] | None = None,
+    scope_symbols: list[str] | None = None,
     scope_adr_topic: str | None = None,
     milestone_number: int | None = None,
     eta_hours: float | None = None,
     agent_id: str | None = None,
 ) -> dict:
     """Declare intent to work on something. Returns conflicts + suggestions.
+
+    `scope_symbols` (optional): code symbol/concept names the agent intends to touch.
+    If the repo is indexed by GitNexus, each symbol's downstream blast radius is
+    resolved via `gitnexus impact` and unioned into the conflict-detection scope —
+    catches semantic collisions (two agents on different files, same dependent code)
+    that pure `scope_files` overlap misses. Best-effort: silently degrades to
+    file-only matching if GitNexus is absent or the repo isn't indexed.
 
     Does NOT mutate GitHub yet. The caller (or the user) then chooses to:
     - claim an existing issue (call `claim_issue`)
@@ -158,20 +176,25 @@ def checkin(
     repo_path_abs = str(Path(repo_path).resolve())
     repo_slug = _detect_repo_slug(repo_path_abs)
     scope_files = scope_files or []
+    scope_symbols = scope_symbols or []
 
-    conflicts = _find_conflicts(repo_path_abs, scope_files)
+    expansion = gitnexus_bridge.expand_scope(Path(repo_path_abs).name, scope_symbols)
+    expanded_files = expansion["files"]
+
+    conflicts = _find_conflicts(repo_path_abs, sorted(set(scope_files) | set(expanded_files)))
     similar_issues = _find_similar_issues(repo_slug, title) if repo_slug else []
 
     wi_id = _generate_id()
     with connection() as conn:
         conn.execute(
             "INSERT INTO work_items "
-            "(id, repo, title, scope_files, scope_adr_topic, milestone_number, "
-            " agent_id, status, eta_hours, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 'declared', ?, ?, ?)",
-            (wi_id, repo_path_abs, title, json.dumps(scope_files),
-             scope_adr_topic, milestone_number, agent_id, eta_hours,
-             now_iso(), now_iso()),
+            "(id, repo, title, scope_files, scope_symbols, scope_symbols_expanded, "
+            " scope_adr_topic, milestone_number, agent_id, status, eta_hours, "
+            " created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'declared', ?, ?, ?)",
+            (wi_id, repo_path_abs, title, json.dumps(scope_files), json.dumps(scope_symbols),
+             json.dumps(expanded_files), scope_adr_topic, milestone_number, agent_id,
+             eta_hours, now_iso(), now_iso()),
         )
 
     result = {
@@ -180,6 +203,8 @@ def checkin(
         "repo_slug": repo_slug,
         "title": title,
         "status": "declared",
+        "scope_symbols_expanded": expanded_files,
+        "gitnexus_warnings": expansion["warnings"],
         "conflicts": conflicts,
         "similar_existing_issues": similar_issues,
         "suggested_action": _suggest_action(conflicts, similar_issues),

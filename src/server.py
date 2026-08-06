@@ -47,6 +47,7 @@ def checkin(
     repo_path: str,
     title: str,
     scope_files: list[str] | None = None,
+    scope_symbols: list[str] | None = None,
     scope_adr_topic: str | None = None,
     milestone_number: int | None = None,
     eta_hours: float | None = None,
@@ -58,20 +59,26 @@ def checkin(
         repo_path: Absolute path to the repo root (where `docs/adr/` lives).
         title: Short description (used as fallback issue title).
         scope_files: List of file paths the agent intends to modify (relative to repo).
+        scope_symbols: Code symbol/concept names the agent intends to touch. If the repo
+            is indexed by GitNexus, each symbol's downstream blast radius is resolved and
+            unioned into scope_files for conflict detection — catches two agents editing
+            different files that both depend on the same symbol. Best-effort, degrades
+            silently to file-only matching if GitNexus is unavailable.
         scope_adr_topic: If creating an ADR, the topic — coord-mcp will reserve a number.
         milestone_number: GitHub milestone to attach (optional).
         eta_hours: Estimated time to complete (optional).
         agent_id: Identifier (e.g. worktree name) so other agents see who's working.
 
     Returns:
-        work_item_id, conflicts (overlapping active work), similar_existing_issues,
-        suggested_action ('REVIEW_CONFLICTS' / 'CONSIDER_CLAIMING' / 'CREATE_NEW').
-        Caller then chooses to claim_issue, claim_new, or abandon.
+        work_item_id, scope_symbols_expanded, gitnexus_warnings, conflicts (overlapping
+        active work), similar_existing_issues, suggested_action ('REVIEW_CONFLICTS' /
+        'CONSIDER_CLAIMING' / 'CREATE_NEW'). Caller then chooses claim_issue/claim_new/abandon.
     """
     return _checkin(
         repo_path=repo_path,
         title=title,
         scope_files=scope_files,
+        scope_symbols=scope_symbols,
         scope_adr_topic=scope_adr_topic,
         milestone_number=milestone_number,
         eta_hours=eta_hours,
