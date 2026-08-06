@@ -3,15 +3,15 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.bdelpech.coord-mcp</string>
+    <string>com.example.coord-mcp</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/bdelpech/dev/github/coord-mcp/.venv/bin/python</string>
+        <string>__COORD_MCP_HOME__/.venv/bin/python</string>
         <string>-m</string>
         <string>src.server</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/bdelpech/dev/github/coord-mcp</string>
+    <string>__COORD_MCP_HOME__</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -25,9 +25,9 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
-        <string>/Users/bdelpech</string>
+        <string>__HOME__</string>
         <key>PATH</key>
-        <string>/Users/bdelpech/dev/github/coord-mcp/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>__COORD_MCP_HOME__/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
 </dict>
 </plist>

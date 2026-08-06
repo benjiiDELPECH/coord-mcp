@@ -6,13 +6,13 @@ Central coordination MCP server for multi-agent / multi-session work : atomic AD
 
 When several Claude Code sessions (or other LLM agents) work in parallel on the same set of repos, they collide on shared named resources : ADR numbers, branch names, GitHub issues. Filesystem scans and ad-hoc scripts can't guarantee atomicity. `coord-mcp` is a single broker process exposing typed MCP tools backed by SQLite with `UNIQUE` constraints and retry-on-conflict loops.
 
-Background and architectural decision : **ADR-060** in [alert-immo](https://github.com/benjiiDELPECH/alert-immo/blob/main/docs/adr/ADR-060-coord-mcp-plateforme-centrale-coordination-multi-agents.md).
+Born out of a real incident: three collisions in a single day between two parallel Claude Code sessions sharing a working tree — one session's checkout stashed the other's uncommitted work, and an unresolved merge conflict broke a shared dev server. Git worktree isolation prevents *file*-level collisions, but not collisions on shared resources that live outside any single worktree — ports, caches, sequential ID allocation (ADR numbers), ratchet baselines. `coord-mcp` addresses that gap with explicit scope declaration and conflict detection *before* the collision, rather than isolation after the fact.
 
 ## Stack
 
 - Python 3.13 + [FastMCP](https://github.com/modelcontextprotocol/python-sdk) (MCP SDK)
 - SQLite (WAL mode) at `~/.coord-mcp/state.db`
-- launchd auto-respawn (`com.bdelpech.coord-mcp.plist`)
+- launchd auto-respawn (`deploy/com.example.coord-mcp.plist.template`)
 - HTTP transport on `127.0.0.1:8015`
 
 ## Tools exposed (11)
@@ -34,8 +34,8 @@ Background and architectural decision : **ADR-060** in [alert-immo](https://gith
 ## Install (macOS)
 
 ```bash
-# Clone
-git clone git@github.com:benjiiDELPECH/coord-mcp.git ~/dev/github/coord-mcp
+# Clone (replace with your own fork/remote if you forked it)
+git clone https://github.com/benjiiDELPECH/coord-mcp.git ~/dev/github/coord-mcp
 cd ~/dev/github/coord-mcp
 
 # Venv + deps
@@ -55,8 +55,11 @@ p.write_text(json.dumps(d, indent=2))
 "
 
 # Install launchd plist (persistent, auto-start at login)
-cp deploy/com.bdelpech.coord-mcp.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.bdelpech.coord-mcp.plist
+# Substitute the placeholders for your own paths, then install:
+sed -e "s|__COORD_MCP_HOME__|$HOME/dev/github/coord-mcp|g" \
+    -e "s|__HOME__|$HOME|g" \
+    deploy/com.example.coord-mcp.plist.template > ~/Library/LaunchAgents/com.you.coord-mcp.plist
+launchctl load ~/Library/LaunchAgents/com.you.coord-mcp.plist
 launchctl list | grep coord-mcp   # verify
 
 # Verify
@@ -116,4 +119,4 @@ mcp__coord-mcp__claim_adr_number(
 
 ## License
 
-Private — Benjamin Delpech personal infra.
+MIT — see [LICENSE](./LICENSE).
