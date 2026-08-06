@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS work_items (
     repo                TEXT NOT NULL,
     title               TEXT NOT NULL,
     scope_files         TEXT,
+    scope_symbols       TEXT,
+    scope_symbols_expanded TEXT,
     scope_adr_topic     TEXT,
     github_issue_number INTEGER,
     milestone_number    INTEGER,
@@ -76,6 +78,20 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+WORK_ITEMS_COLUMNS = {
+    "scope_symbols": "TEXT",
+    "scope_symbols_expanded": "TEXT",
+}
+
+
+def _migrate_work_items_columns(conn: sqlite3.Connection) -> None:
+    """Add any WORK_ITEMS_COLUMNS missing on an existing table (additive, idempotent)."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(work_items)")}
+    for column, sql_type in WORK_ITEMS_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE work_items ADD COLUMN {column} {sql_type}")
+
+
 def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
     """Create the DB and schema if not present. Enable WAL for read concurrency."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,6 +99,7 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(SCHEMA)
+        _migrate_work_items_columns(conn)
         conn.commit()
 
 
