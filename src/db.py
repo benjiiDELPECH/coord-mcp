@@ -58,6 +58,23 @@ CREATE TABLE IF NOT EXISTS adr_allocations (
 
 CREATE INDEX IF NOT EXISTS idx_adr_repo ON adr_allocations(repo_path);
 
+-- Numéros de version Flyway. Même mécanique que adr_allocations, mais la source de
+-- vérité inclut TOUTES les refs git : un numéro est pris dès qu'une branche non mergée
+-- le porte (incident alert-immo 2026-08-07 — V91 revendiquée par 5 contenus).
+CREATE TABLE IF NOT EXISTS migration_allocations (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_path         TEXT NOT NULL,
+    version           INTEGER NOT NULL,
+    description_slug  TEXT NOT NULL,
+    filename          TEXT NOT NULL,
+    work_item_id      TEXT,
+    allocated_to      TEXT,
+    allocated_at      TEXT NOT NULL,
+    UNIQUE (repo_path, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_migration_repo ON migration_allocations(repo_path);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp   TEXT NOT NULL,

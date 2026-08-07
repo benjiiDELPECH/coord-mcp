@@ -29,6 +29,8 @@ def temp_db(tmp_path, monkeypatch):
     importlib.reload(_db)
     import src.work_items as _wi
     importlib.reload(_wi)
+    import src.migration as _mig
+    importlib.reload(_mig)
 
     _db.init_db()
 

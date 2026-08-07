@@ -29,6 +29,8 @@ Born out of a real incident: three collisions in a single day between two parall
 | `list_active_work` | visibility | All non-terminal work items, optionally per-repo |
 | `get_work` | visibility | Inspect single work item by id |
 | `list_adr_allocations` | registry | Cross-repo ADR number registry |
+| `claim_migration_number` | atomic | Allocate next free Flyway version — scans **all git refs**, not just disk |
+| `list_migration_allocations` | registry | Cross-repo Flyway version registry |
 | `audit_tail` | debug | Last N audit log entries |
 
 ## Install (macOS)

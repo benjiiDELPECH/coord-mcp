@@ -11,6 +11,8 @@ Exposes :
   - abandon              drop a declared item that won't be done
   - claim_adr_number     atomically allocate the next free ADR number
   - list_adr_allocations cross-repo ADR registry view
+  - claim_migration_number   atomically allocate the next free Flyway version
+  - list_migration_allocations  cross-repo migration registry view
   - audit_tail           last N audit log entries (debug)
 
 Default transport: streamable-http on 127.0.0.1:8015.
@@ -24,6 +26,10 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from .adr import claim_adr, list_allocations
+from .migration import (
+    claim_migration,
+    list_migration_allocations as _list_migration_allocations,
+)
 from .checkout import abandon, checkout, release
 from .db import connection, init_db
 from .work_items import (
@@ -186,6 +192,58 @@ def claim_adr_number(
 def list_adr_allocations(repo_path: str | None = None) -> list[dict[str, Any]]:
     """Show all ADR allocations known to coord-mcp. Filter by repo if given."""
     return list_allocations(repo_path=repo_path)
+
+
+# ── Flyway migration registry ────────────────────────────────────────
+
+
+@mcp.tool()
+def claim_migration_number(
+    repo_path: str,
+    description: str,
+    migrations_dir: str | None = None,
+    work_item_id: str | None = None,
+    allocated_to: str | None = None,
+    scan_branches: bool = True,
+) -> dict[str, Any]:
+    """Atomically allocate the next free Flyway migration version for a repo.
+
+    À appeler AVANT d'écrire un fichier `V<n>__*.sql`, comme claim_adr_number pour un ADR.
+
+    Différence avec l'allocation d'ADR : la source de vérité inclut **toutes les refs
+    git**, pas seulement le disque. Un numéro est pris dès qu'une branche non mergée le
+    porte — invisible depuis le working tree. Sur alert-immo (2026-08-07), `main`
+    s'arrêtait à V94 alors que les branches portaient déjà V95 à V98 ; un scan du seul
+    disque aurait alloué V95, déjà revendiquée trois fois.
+
+    Quatre sources : disque, refs git (`git log --all`), allocations en base, puis la
+    contrainte UNIQUE pour trancher les courses restantes.
+
+    Returns: version, filename, file_path, slug, migrations_dir, max_disk, max_git,
+    max_db, holes, git_scan_ok, repo, description.
+
+    `holes` liste les numéros absents partout sous le maximum. Ce ne sont PAS des
+    versions réutilisables : elles peuvent être appliquées sur un environnement sans
+    fichier en face — vérifier `flyway_schema_history` avant toute décision.
+
+    `git_scan_ok=False` signale que le scan git n'a rien renvoyé (dépôt non git, timeout,
+    répertoire inconnu de l'historique) : l'allocation reste sérialisée par la base, mais
+    la garantie inter-branches n'est pas acquise.
+    """
+    return claim_migration(
+        repo_path=repo_path,
+        description=description,
+        migrations_dir=migrations_dir,
+        work_item_id=work_item_id,
+        allocated_to=allocated_to,
+        scan_branches=scan_branches,
+    )
+
+
+@mcp.tool()
+def list_migration_allocations(repo_path: str | None = None) -> list[dict[str, Any]]:
+    """Show all Flyway migration allocations known to coord-mcp. Filter by repo if given."""
+    return _list_migration_allocations(repo_path=repo_path)
 
 
 # ── Audit ────────────────────────────────────────────────────────────
