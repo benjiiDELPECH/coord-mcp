@@ -16,6 +16,7 @@ This handles three failure modes:
 
 from __future__ import annotations
 
+import logging
 import random
 import re
 import sqlite3
@@ -25,6 +26,8 @@ from datetime import date
 from pathlib import Path
 
 from .db import connection, now_iso
+
+logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 8
 ADR_FILE_RE = re.compile(r"^ADR-(\d{3,4})-")
@@ -120,6 +123,10 @@ def claim_adr(
             # case, where INSERT might still succeed because the DB row is fresh).
             if any(ADR_FILE_RE.match(p.name) and int(ADR_FILE_RE.match(p.name).group(1)) == candidate
                    for p in adr_dir.iterdir() if p.is_file()):
+                logger.warning(
+                    "claim_adr: candidate ADR-%03d already on disk for %s, retrying (attempt %d/%d)",
+                    candidate, repo, attempt + 1, MAX_RETRIES,
+                )
                 time.sleep(_backoff_delay(attempt))
                 continue  # retry, scan_filesystem_max will pick it up
 
@@ -131,6 +138,10 @@ def claim_adr(
                     (str(repo), candidate, slug, filename, work_item_id, allocated_to, now_iso()),
                 )
             except sqlite3.IntegrityError:
+                logger.warning(
+                    "claim_adr: UNIQUE collision on ADR-%03d for %s, retrying (attempt %d/%d)",
+                    candidate, repo, attempt + 1, MAX_RETRIES,
+                )
                 time.sleep(_backoff_delay(attempt))
                 continue  # UNIQUE constraint hit, retry with fresh scan
 
@@ -149,6 +160,10 @@ def claim_adr(
             "topic": topic,
         }
 
+    logger.error(
+        "claim_adr: exhausted %d attempts for %s — heavy contention or a stuck lock",
+        MAX_RETRIES, repo,
+    )
     raise RuntimeError(
         f"Failed to allocate ADR number after {MAX_RETRIES} attempts (heavy contention?)"
     )
