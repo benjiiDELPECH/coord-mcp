@@ -23,6 +23,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from . import gitnexus_bridge
 from .adr import claim_adr, list_allocations
 from .checkout import abandon, checkout, release
 from .db import connection, init_db
@@ -32,11 +33,17 @@ from .work_items import (
     claim_new as _claim_new,
     get_work_item,
     list_active_work as _list_active_work,
+    plan_parallel_waves as _plan_parallel_waves,
     relink_issue as _relink_issue,
+    set_scope_resolver,
 )
 
 
 init_db()
+# Composition root: work_items.py only knows the ScopeResolver contract
+# (scope_resolver.py) — GitNexus is wired here as the default implementation,
+# swappable without touching conflict-detection logic.
+set_scope_resolver(gitnexus_bridge.expand_scope)
 mcp = FastMCP("coord-mcp", host="127.0.0.1", port=8015)
 
 
@@ -174,6 +181,18 @@ def list_active_work(repo_path: str | None = None) -> list[dict[str, Any]]:
 def get_work(work_item_id: str) -> dict[str, Any] | None:
     """Fetch a single work item's full record."""
     return get_work_item(work_item_id)
+
+
+@mcp.tool()
+def plan_parallel_waves(repo_path: str) -> dict[str, Any]:
+    """Partition every active work item into the minimum number of conflict-free waves.
+
+    Greedy graph coloring on scope overlap (declared scope_files ∪ GitNexus-expanded
+    scope_symbols): two items in the same wave are guaranteed disjoint and safe to
+    run fully in parallel; items in different waves must be sequenced. Answers
+    "how many agents can I actually run at once right now" for a given repo.
+    """
+    return _plan_parallel_waves(repo_path=repo_path)
 
 
 # ── ADR registry ─────────────────────────────────────────────────────
