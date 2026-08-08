@@ -277,3 +277,90 @@ def list_migration_allocations(repo_path: str | None = None) -> list[dict]:
                 "SELECT * FROM migration_allocations ORDER BY repo_path, version"
             ).fetchall()
         return [dict(r) for r in rows]
+
+
+def release_migration(
+    repo_path: str,
+    version: int,
+    raison: str = "",
+    migrations_dir: str | None = None,
+) -> dict:
+    """Libère une version réservée mais jamais utilisée.
+
+    Pourquoi ce complément existe
+    -----------------------------
+    `claim_migration_number` sans contrepartie transforme chaque branche abandonnée en
+    trou de séquence permanent. Or un trou n'est pas neutre : il peut correspondre à une
+    version APPLIQUÉE sur un environnement sans fichier en face (cas alert-immo V91/V92),
+    et le garde-fou CI le signale à chaque exécution. Réserver sans pouvoir rendre, c'est
+    fabriquer du bruit qu'il faudra ensuite apprendre à ignorer — exactement ce qu'un
+    garde-fou ne doit jamais produire.
+
+    Le garde-fou de sûreté
+    ----------------------
+    On refuse de libérer une version dont le fichier existe **quelque part** — disque ou
+    n'importe quelle ref git. Une allocation dont le fichier est écrit n'est plus une
+    réservation : c'est une migration, et son numéro est acquis. La libérer inviterait un
+    autre agent à réutiliser un numéro déjà porté par du code.
+
+    Args:
+        repo_path: racine du dépôt.
+        version: version majeure à libérer.
+        raison: pourquoi (tracé dans l'audit ; recommandé, non obligatoire).
+        migrations_dir: chemin du répertoire de migrations (auto-détecté sinon).
+
+    Returns:
+        released (bool), version, raison, plus le motif de refus le cas échéant :
+        `fichier_present` avec l'endroit où il a été trouvé, ou `absente_du_registre`.
+    """
+    repo = Path(repo_path).resolve()
+    if not repo.is_dir():
+        raise FileNotFoundError(f"Repo path not found: {repo}")
+
+    mig_dir = find_migrations_dir(repo, migrations_dir)
+
+    # Le fichier existe-t-il quelque part ? Si oui, ce n'est plus une réservation.
+    sur_disque = version in scan_disk(mig_dir)
+    sur_git = version in scan_git(repo, mig_dir)
+    if sur_disque or sur_git:
+        ou = "le working tree" if sur_disque else "une ref git"
+        return {
+            "released": False,
+            "version": version,
+            "motif": "fichier_present",
+            "detail": (
+                f"V{version} porte un fichier de migration existant sur {ou}. "
+                "Ce n'est plus une réservation mais une migration : son numéro est acquis. "
+                "Le libérer inviterait un autre agent à réutiliser un numéro déjà pris."
+            ),
+            "repo": str(repo),
+        }
+
+    with connection() as conn:
+        ligne = conn.execute(
+            "SELECT description_slug, allocated_to, allocated_at FROM migration_allocations "
+            "WHERE repo_path = ? AND version = ?",
+            (str(repo), version),
+        ).fetchone()
+        if ligne is None:
+            return {
+                "released": False,
+                "version": version,
+                "motif": "absente_du_registre",
+                "detail": f"V{version} n'est pas réservée pour ce dépôt — rien à libérer.",
+                "repo": str(repo),
+            }
+        conn.execute(
+            "DELETE FROM migration_allocations WHERE repo_path = ? AND version = ?",
+            (str(repo), version),
+        )
+
+    return {
+        "released": True,
+        "version": version,
+        "description_slug": ligne["description_slug"],
+        "allocated_to": ligne["allocated_to"],
+        "allocated_at": ligne["allocated_at"],
+        "raison": raison,
+        "repo": str(repo),
+    }

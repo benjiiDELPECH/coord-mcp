@@ -31,6 +31,7 @@ Born out of a real incident: three collisions in a single day between two parall
 | `list_adr_allocations` | registry | Cross-repo ADR number registry |
 | `claim_migration_number` | atomic | Allocate next free Flyway version — scans **all git refs**, not just disk |
 | `list_migration_allocations` | registry | Cross-repo Flyway version registry |
+| `release_migration_number` | atomic | Rend une version réservée mais jamais écrite (refuse si le fichier existe) |
 | `audit_tail` | debug | Last N audit log entries |
 
 ## Install (macOS)

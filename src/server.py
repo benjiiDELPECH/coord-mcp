@@ -13,6 +13,7 @@ Exposes :
   - list_adr_allocations cross-repo ADR registry view
   - claim_migration_number   atomically allocate the next free Flyway version
   - list_migration_allocations  cross-repo migration registry view
+  - release_migration_number    rend une version réservée mais jamais écrite
   - audit_tail           last N audit log entries (debug)
 
 Default transport: streamable-http on 127.0.0.1:8015.
@@ -28,6 +29,7 @@ from mcp.server.fastmcp import FastMCP
 from .adr import claim_adr, list_allocations
 from .migration import (
     claim_migration,
+    release_migration,
     list_migration_allocations as _list_migration_allocations,
 )
 from .checkout import abandon, checkout, release
@@ -245,6 +247,36 @@ def list_migration_allocations(repo_path: str | None = None) -> list[dict[str, A
     """Show all Flyway migration allocations known to coord-mcp. Filter by repo if given."""
     return _list_migration_allocations(repo_path=repo_path)
 
+
+@mcp.tool()
+def release_migration_number(
+    repo_path: str,
+    version: int,
+    raison: str = "",
+    migrations_dir: str | None = None,
+) -> dict[str, Any]:
+    """Rend une version de migration réservée mais jamais utilisée (branche abandonnée).
+
+    Réserver sans pouvoir rendre transforme chaque branche abandonnée en trou de séquence
+    permanent. Or un trou n'est pas neutre : il peut correspondre à une version APPLIQUÉE
+    sur un environnement sans fichier en face, et le garde-fou CI le signale à chaque
+    exécution. Un garde-fou qui produit du bruit qu'il faut apprendre à ignorer cesse
+    d'être un garde-fou.
+
+    GARDE-FOU : refuse de libérer une version dont le fichier existe quelque part — disque
+    ou n'importe quelle ref git. Une allocation dont le fichier est écrit n'est plus une
+    réservation, c'est une migration : son numéro est acquis, et le rendre inviterait un
+    autre agent à réutiliser un numéro déjà porté par du code.
+
+    Returns: released (bool), version, et en cas de refus le motif — `fichier_present`
+    avec l'endroit où il a été trouvé, ou `absente_du_registre`.
+    """
+    return release_migration(
+        repo_path=repo_path,
+        version=version,
+        raison=raison,
+        migrations_dir=migrations_dir,
+    )
 
 # ── Audit ────────────────────────────────────────────────────────────
 

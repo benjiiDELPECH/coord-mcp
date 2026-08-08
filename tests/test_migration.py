@@ -173,3 +173,57 @@ def test_repertoire_introuvable_leve(tmp_path):
 def test_repo_absent_leve(tmp_path, mig):
     with pytest.raises(FileNotFoundError):
         mig.claim_migration(str(tmp_path / "nexiste_pas"), "x")
+
+
+# ── Libération d'une réservation ──────────────────────────────────────
+
+
+def test_liberer_une_reservation_jamais_ecrite(tmp_path, mig):
+    repo, _ = make_repo(tmp_path, ["V1__a.sql"])
+    a = mig.claim_migration(str(repo), "abandonnee", allocated_to="agent-x")
+    assert a["version"] == 2
+
+    r = mig.release_migration(str(repo), 2, raison="branche abandonnée")
+    assert r["released"] is True
+    assert r["allocated_to"] == "agent-x"
+    assert mig.list_migration_allocations(str(repo)) == []
+
+    # Le numéro redevient disponible — c'est tout l'objet.
+    assert mig.claim_migration(str(repo), "suivante")["version"] == 2
+
+
+def test_GARDE_FOU_refuse_de_liberer_un_numero_dont_le_fichier_existe(tmp_path, mig):
+    # Le fichier est écrit : ce n'est plus une réservation, c'est une migration.
+    repo, mig_dir = make_repo(tmp_path, ["V1__a.sql"])
+    mig.claim_migration(str(repo), "utilisee")
+    (mig_dir / "V2__utilisee.sql").write_text("-- noop\n")
+
+    r = mig.release_migration(str(repo), 2)
+    assert r["released"] is False
+    assert r["motif"] == "fichier_present"
+    assert "working tree" in r["detail"]
+    # L'allocation reste en base : libérer inviterait à réutiliser un numéro pris.
+    assert [x["version"] for x in mig.list_migration_allocations(str(repo))] == [2]
+
+
+def test_GARDE_FOU_refuse_aussi_si_le_fichier_vit_sur_une_BRANCHE(tmp_path, mig):
+    # Le cas qui compte : le fichier n'est pas sur le disque, mais une branche le porte.
+    repo, mig_dir = make_repo(tmp_path, ["V1__a.sql"])
+    mig.claim_migration(str(repo), "sur_branche")
+    git(repo, "checkout", "-qb", "feature")
+    (mig_dir / "V2__sur_branche.sql").write_text("-- noop\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "f")
+    git(repo, "checkout", "-q", "-")
+
+    assert 2 not in mig.scan_disk(mig_dir), "le disque ne voit plus le fichier"
+    r = mig.release_migration(str(repo), 2)
+    assert r["released"] is False, "une branche non mergée suffit à rendre le numéro acquis"
+    assert "ref git" in r["detail"]
+
+
+def test_liberer_une_version_absente_du_registre_ne_casse_rien(tmp_path, mig):
+    repo, _ = make_repo(tmp_path, ["V1__a.sql"])
+    r = mig.release_migration(str(repo), 42)
+    assert r["released"] is False
+    assert r["motif"] == "absente_du_registre"
