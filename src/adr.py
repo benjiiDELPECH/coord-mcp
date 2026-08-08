@@ -16,8 +16,10 @@ This handles three failure modes:
 
 from __future__ import annotations
 
+import random
 import re
 import sqlite3
+import time
 import unicodedata
 from datetime import date
 from pathlib import Path
@@ -26,6 +28,20 @@ from .db import connection, now_iso
 
 MAX_RETRIES = 8
 ADR_FILE_RE = re.compile(r"^ADR-(\d{3,4})-")
+
+BACKOFF_BASE_S = 0.01
+BACKOFF_FACTOR = 2
+BACKOFF_MAX_S = 0.5
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff with full jitter (AWS-style: random(0, cap), not a fixed
+    exponential value). Full jitter matters specifically here: if two agents collide
+    on the same attempt number, a non-jittered backoff has them retry in lockstep
+    and collide again on every subsequent attempt — random(0, cap) breaks that.
+    """
+    cap = min(BACKOFF_MAX_S, BACKOFF_BASE_S * (BACKOFF_FACTOR ** attempt))
+    return random.uniform(0, cap)
 
 
 def slugify(text: str) -> str:
@@ -104,6 +120,7 @@ def claim_adr(
             # case, where INSERT might still succeed because the DB row is fresh).
             if any(ADR_FILE_RE.match(p.name) and int(ADR_FILE_RE.match(p.name).group(1)) == candidate
                    for p in adr_dir.iterdir() if p.is_file()):
+                time.sleep(_backoff_delay(attempt))
                 continue  # retry, scan_filesystem_max will pick it up
 
             try:
@@ -114,6 +131,7 @@ def claim_adr(
                     (str(repo), candidate, slug, filename, work_item_id, allocated_to, now_iso()),
                 )
             except sqlite3.IntegrityError:
+                time.sleep(_backoff_delay(attempt))
                 continue  # UNIQUE constraint hit, retry with fresh scan
 
         created_skeleton = False
