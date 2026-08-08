@@ -15,6 +15,7 @@ provider is wired via `set_scope_resolver` (server.py wires GitNexus by default)
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import uuid
 from pathlib import Path
@@ -22,6 +23,8 @@ from pathlib import Path
 from . import graphiti_bridge
 from .db import connection, log_audit, now_iso
 from .scope_resolver import ScopeResolver, null_resolver
+
+logger = logging.getLogger(__name__)
 
 _scope_resolver: ScopeResolver = null_resolver
 
@@ -278,6 +281,12 @@ def checkin(
     expanded_files = expansion["files"]
 
     conflicts = _find_conflicts(repo_path_abs, sorted(set(scope_files) | set(expanded_files)))
+    if conflicts:
+        logger.warning(
+            "checkin: %r on %s conflicts with %d active item(s): %s",
+            title, repo_path_abs, len(conflicts),
+            [c["work_item_id"] for c in conflicts],
+        )
     similar_issues = _find_similar_issues(repo_slug, title) if repo_slug else []
 
     graphiti_group_id = graphiti_bridge.infer_group_id(repo_path_abs)
