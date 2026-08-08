@@ -7,8 +7,9 @@ Each work item models a unit of agent activity. Lifecycle:
                                                      └─→ abandoned
 
 Conflict detection on checkin = overlap on `scope_files` with other active items,
-unioned with the GitNexus blast-radius of any declared `scope_symbols` (best-effort —
-falls back to file-path-only matching if GitNexus is unavailable or the repo isn't indexed).
+unioned with the blast-radius of any declared `scope_symbols` as resolved by the
+configured ScopeResolver (see scope_resolver.py) — defaults to a no-op until a
+provider is wired via `set_scope_resolver` (server.py wires GitNexus by default).
 """
 
 from __future__ import annotations
@@ -18,8 +19,23 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from . import gitnexus_bridge, graphiti_bridge
+from . import graphiti_bridge
 from .db import connection, log_audit, now_iso
+from .scope_resolver import ScopeResolver, null_resolver
+
+_scope_resolver: ScopeResolver = null_resolver
+
+
+def set_scope_resolver(resolver: ScopeResolver | None) -> None:
+    """Wire the provider used by checkin() to expand scope_symbols into files.
+
+    Pass None to reset to the no-op default (pure file-path matching, zero
+    external dependency). This is the only supported way for checkin() to gain
+    semantic scope expansion — work_items.py never imports a concrete provider
+    itself, see scope_resolver.py for the contract.
+    """
+    global _scope_resolver
+    _scope_resolver = resolver or null_resolver
 
 
 ACTIVE_STATUSES = ("declared", "claimed", "in_progress", "checked_out")
@@ -100,27 +116,41 @@ def _detect_repo_slug(repo_path: str) -> str | None:
         return None
 
 
+def _effective_scope(row) -> set[str]:
+    """A work item's real conflict surface: declared files ∪ GitNexus-expanded symbols."""
+    scope = set(json.loads(row["scope_files"] or "[]"))
+    scope |= set(json.loads(row["scope_symbols_expanded"] or "[]"))
+    return scope
+
+
+def _active_rows(repo: str, conn) -> list:
+    return conn.execute(
+        f"SELECT * FROM work_items WHERE repo = ? AND status IN ({','.join('?' * len(ACTIVE_STATUSES))})",
+        (repo, *ACTIVE_STATUSES),
+    ).fetchall()
+
+
 def _find_conflicts(repo: str, scope_files: list[str]) -> list[dict]:
-    """Return active work items in the same repo with overlapping scope.
+    """Return active work items in the same repo with overlapping scope, oldest first.
 
     `scope_files` here is already the caller's declared files UNIONED with the
     GitNexus-expanded impact of their declared symbols (see `checkin`). Each
-    candidate's own scope is expanded the same way (scope_files ∪ scope_symbols_expanded)
-    before comparing, so a semantic conflict is caught on either side.
+    candidate's own scope is expanded the same way before comparing, so a semantic
+    conflict is caught on either side.
+
+    Ordering is the priority signal: the caller is, by construction, always the
+    youngest transaction (it doesn't exist in the DB yet) — so every returned
+    conflict already holds priority under a wait-die scheme (see `checkin`'s
+    `resolution` field). Oldest-first lets the caller see who to wait on first.
     """
     if not scope_files:
         return []
     scope_set = set(scope_files)
     conflicts = []
     with connection() as conn:
-        rows = conn.execute(
-            f"SELECT * FROM work_items WHERE repo = ? AND status IN ({','.join('?' * len(ACTIVE_STATUSES))})",
-            (repo, *ACTIVE_STATUSES),
-        ).fetchall()
+        rows = _active_rows(repo, conn)
     for row in rows:
-        other_files = set(json.loads(row["scope_files"] or "[]"))
-        other_files |= set(json.loads(row["scope_symbols_expanded"] or "[]"))
-        overlap = scope_set & other_files
+        overlap = scope_set & _effective_scope(row)
         if overlap:
             conflicts.append({
                 "work_item_id": row["id"],
@@ -128,9 +158,75 @@ def _find_conflicts(repo: str, scope_files: list[str]) -> list[dict]:
                 "title": row["title"],
                 "github_issue_number": row["github_issue_number"],
                 "status": row["status"],
+                "created_at": row["created_at"],
                 "overlapping_files": sorted(overlap),
             })
+    conflicts.sort(key=lambda c: c["created_at"])
     return conflicts
+
+
+def plan_parallel_waves(repo_path: str) -> dict:
+    """Partition all active work items into the minimum number of conflict-free waves.
+
+    Models active work items as a graph (edge = overlapping effective scope, see
+    `_effective_scope`) and greedily colors it: process oldest-first (stable,
+    deterministic), assign each item the lowest-numbered wave not already used by
+    a conflicting neighbor. Two items in the same wave are guaranteed scope-disjoint
+    and can run fully in parallel; items in different waves must be sequenced.
+
+    Greedy coloring is not guaranteed minimum in the general case (graph coloring
+    is NP-hard), but is a good, fast, deterministic approximation at the scale this
+    tool operates at (tens of concurrent agents, not thousands).
+    """
+    repo_path_abs = str(Path(repo_path).resolve())
+    with connection() as conn:
+        rows = _active_rows(repo_path_abs, conn)
+
+    items = sorted(
+        ({"id": r["id"], "title": r["title"], "agent_id": r["agent_id"],
+          "created_at": r["created_at"], "scope": _effective_scope(r)} for r in rows),
+        key=lambda i: i["created_at"],
+    )
+
+    wave_of: dict[str, int] = {}
+    waves: list[list[dict]] = []
+    for item in items:
+        conflicting_waves = {
+            wave_of[other["id"]]
+            for other in items
+            if other["id"] in wave_of and (item["scope"] & other["scope"])
+        }
+        wave_idx = next(i for i in range(len(items) + 1) if i not in conflicting_waves)
+        wave_of[item["id"]] = wave_idx
+        if wave_idx == len(waves):
+            waves.append([])
+        waves[wave_idx].append({"work_item_id": item["id"], "title": item["title"],
+                                 "agent_id": item["agent_id"]})
+
+    return {
+        "repo_path": repo_path_abs,
+        "wave_count": len(waves),
+        "waves": [{"wave": i + 1, "can_run_in_parallel": w} for i, w in enumerate(waves)],
+    }
+
+
+def _resolve_priority(conflicts: list[dict]) -> dict:
+    """Wait-Die instantiated for checkin-time coordination.
+
+    The checking-in item is, by construction, always the youngest transaction —
+    it has no row in the DB yet. Every active work item it conflicts with is
+    therefore always older, so under Wait-Die the arriving agent always yields:
+    there is no "wound" branch here, only "wait or die" (checkin-time coordination
+    never lets a new arrival preempt in-flight work — that would need an explicit
+    priority override, out of scope for this default policy).
+    """
+    if not conflicts:
+        return {"strategy": "none", "you_should": "PROCEED", "wait_on": []}
+    return {
+        "strategy": "wait-die (oldest declared work has priority)",
+        "you_should": "WAIT_OR_ABORT",
+        "wait_on": [c["work_item_id"] for c in conflicts],  # already oldest-first
+    }
 
 
 def _find_similar_issues(repo_slug: str, query: str, limit: int = 5) -> list[dict]:
@@ -178,7 +274,7 @@ def checkin(
     scope_files = scope_files or []
     scope_symbols = scope_symbols or []
 
-    expansion = gitnexus_bridge.expand_scope(Path(repo_path_abs).name, scope_symbols)
+    expansion = _scope_resolver(Path(repo_path_abs).name, scope_symbols)
     expanded_files = expansion["files"]
 
     conflicts = _find_conflicts(repo_path_abs, sorted(set(scope_files) | set(expanded_files)))
@@ -212,6 +308,7 @@ def checkin(
         "scope_symbols_expanded": expanded_files,
         "gitnexus_warnings": expansion["warnings"],
         "conflicts": conflicts,
+        "resolution": _resolve_priority(conflicts),
         "similar_existing_issues": similar_issues,
         "graphiti_prior_decisions": [
             {"name": n.get("name"), "summary": n.get("summary")} for n in graphiti_result["nodes"]
