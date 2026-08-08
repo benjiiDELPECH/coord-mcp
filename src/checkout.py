@@ -20,6 +20,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from . import graphiti_bridge
 from .db import connection, log_audit, now_iso
 from .work_items import _detect_repo_slug, _gh, _row_to_dict, ACTIVE_STATUSES
 
@@ -142,11 +143,19 @@ def release(
             (outcome, now_iso(), work_item_id),
         )
 
+    graphiti_group_id = graphiti_bridge.infer_group_id(item["repo"])
+    if graphiti_group_id:
+        graphiti_result = graphiti_bridge.persist_outcome(item["title"], outcome, graphiti_group_id)
+    else:
+        graphiti_result = {"persisted": False, "warnings": ["repo has no known Graphiti group_id — skipped"]}
+
     result = {
         "work_item_id": work_item_id,
         "status": "released",
         "github_issue_closed": closed,
         "outcome": outcome[:200],
+        "graphiti_persisted": graphiti_result["persisted"],
+        "graphiti_warnings": graphiti_result["warnings"],
     }
     log_audit("release",
               args={"work_item_id": work_item_id, "close_github_issue": close_github_issue,

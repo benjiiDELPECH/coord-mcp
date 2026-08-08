@@ -18,7 +18,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from . import gitnexus_bridge
+from . import gitnexus_bridge, graphiti_bridge
 from .db import connection, log_audit, now_iso
 
 
@@ -184,6 +184,12 @@ def checkin(
     conflicts = _find_conflicts(repo_path_abs, sorted(set(scope_files) | set(expanded_files)))
     similar_issues = _find_similar_issues(repo_slug, title) if repo_slug else []
 
+    graphiti_group_id = graphiti_bridge.infer_group_id(repo_path_abs)
+    if graphiti_group_id:
+        graphiti_result = graphiti_bridge.search_prior_decisions(title, graphiti_group_id)
+    else:
+        graphiti_result = {"nodes": [], "warnings": ["repo has no known Graphiti group_id — skipped"]}
+
     wi_id = _generate_id()
     with connection() as conn:
         conn.execute(
@@ -207,7 +213,11 @@ def checkin(
         "gitnexus_warnings": expansion["warnings"],
         "conflicts": conflicts,
         "similar_existing_issues": similar_issues,
-        "suggested_action": _suggest_action(conflicts, similar_issues),
+        "graphiti_prior_decisions": [
+            {"name": n.get("name"), "summary": n.get("summary")} for n in graphiti_result["nodes"]
+        ],
+        "graphiti_warnings": graphiti_result["warnings"],
+        "suggested_action": _suggest_action(conflicts, similar_issues, graphiti_result["nodes"]),
         "next_call": {
             "to_claim_existing": "claim_issue(work_item_id, github_issue_number)",
             "to_create_new": "claim_new(work_item_id, title, body)",
@@ -219,9 +229,14 @@ def checkin(
     return result
 
 
-def _suggest_action(conflicts: list[dict], similar: list[dict]) -> str:
+def _suggest_action(conflicts: list[dict], similar: list[dict], graphiti_nodes: list[dict] | None = None) -> str:
     if conflicts:
         return "REVIEW_CONFLICTS — overlapping scope detected, decide whether to abort or coordinate"
+    if graphiti_nodes:
+        return (
+            f"REVIEW_PRIOR_DECISIONS — {len(graphiti_nodes)} Graphiti node(s) already exist on this "
+            "topic, possibly on an unmerged branch — read them before designing an approach"
+        )
     if similar:
         return f"CONSIDER_CLAIMING — {len(similar)} similar open issue(s) might already cover this"
     return "CREATE_NEW — no conflicts, no similar work, safe to create new issue"
