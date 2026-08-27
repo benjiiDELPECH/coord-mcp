@@ -17,6 +17,7 @@ release(work_item_id, outcome, close_github_issue?) :
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -36,10 +37,17 @@ def checkout(
     Auto-detection cascade (when diff_files is None and auto_detect_diff):
       1. Explicit `worktree_path` param (escape hatch) → use it as cwd.
       2. Scope-matching worktree: iterate `git worktree list`, return the
-         worktree whose diff vs origin/main best overlaps declared scope.
+         worktree whose diff vs the resolved reference branch (see
+         `resolve_reference_ref`) best overlaps declared scope.
          Resolves #4 (HEAD ambigu when working in dedicated worktrees).
       3. Fallback to repo_path HEAD (original behaviour). Emits an explicit
-         warning if HEAD == origin/main (resolves #2: empty diff is suspicious).
+         warning if HEAD == reference branch (resolves #2: empty diff is
+         suspicious).
+
+    The reference branch is NOT hardcoded to `origin/main` — coord-mcp is
+    shared across repos with different canonical remotes (e.g. a repo whose
+    canonical remote is `forgejo`, with `origin` as a stale GitHub mirror).
+    See `resolve_reference_ref` for the resolution order.
     """
     with connection() as conn:
         row = conn.execute("SELECT * FROM work_items WHERE id = ?", (work_item_id,)).fetchone()
@@ -204,8 +212,127 @@ def abandon(work_item_id: str, reason: str = "") -> dict:
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
+_DEFAULT_REFERENCE_REMOTE = "origin"
+_DEFAULT_REFERENCE_BRANCH = "main"
+
+
+def _list_remotes(repo_path: str) -> list[str]:
+    """Return configured remote names (`git remote`). Empty list on any error."""
+    try:
+        result = subprocess.run(
+            ["git", "remote"], capture_output=True, text=True, cwd=repo_path, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        return []
+    if result.returncode != 0:
+        return []
+    return [r for r in result.stdout.strip().splitlines() if r]
+
+
+def _remote_ref_if_exists(repo_path: str, remote: str) -> str | None:
+    """Return '<remote>/main' or '<remote>/master' (whichever resolves), else None."""
+    for branch in (_DEFAULT_REFERENCE_BRANCH, "master"):
+        ref = f"{remote}/{branch}"
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", ref],
+                capture_output=True, text=True, cwd=repo_path, timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+            return None
+        if result.returncode == 0 and result.stdout.strip():
+            return ref
+    return None
+
+
+def _ref_commit_epoch(repo_path: str, ref: str) -> int:
+    """Unix timestamp of the tip commit of `ref`, or -1 if unresolvable."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%ct", ref],
+            capture_output=True, text=True, cwd=repo_path, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        return -1
+    if result.returncode != 0 or not result.stdout.strip():
+        return -1
+    try:
+        return int(result.stdout.strip().splitlines()[0])
+    except ValueError:
+        return -1
+
+
+def resolve_reference_ref(repo_path: str) -> str:
+    """Determine which `<remote>/<branch>` ref HEAD should be diffed against.
+
+    Root cause this fixes: `checkout_work` used to hardcode `origin/main` as
+    the diff baseline. coord-mcp is shared across MULTIPLE repos, and not
+    every repo's canonical remote is `origin` — e.g. alert-immo's canonical
+    remote is `forgejo`, with `origin` left behind as a stale GitHub mirror.
+    Diffing against the stale mirror produced huge phantom diffs (hundreds of
+    "conflicting" files that were actually just commits already on the real
+    canonical branch), which `checkout()` then reported as bogus parallel
+    scope conflicts. A hardcoded remote name is structurally wrong in a
+    multi-repo tool — this makes the reference branch configurable/detected
+    per repo instead.
+
+    Resolution order (most to least specific):
+      1. Per-repo git config `coord-mcp.canonical-remote`
+         (`git config coord-mcp.canonical-remote forgejo` inside the repo) —
+         explicit, versioned-in-intent, scoped to exactly this repo.
+      2. `COORD_MCP_REFERENCE_REMOTE` env var — explicit global override,
+         useful when many repos share the same non-`origin` convention.
+      3. Auto-detect: among all configured remotes with a resolvable
+         main/master ref, pick the one whose ref has the MOST RECENT commit
+         timestamp. A stale mirror loses by construction — no hardcoded
+         remote name required, and this degrades gracefully if the user
+         never configured anything.
+      4. Fallback: 'origin/main' — preserves original behaviour for the
+         common case of a single standard remote (or when no remotes are
+         configured, e.g. tests / bare working copies).
+    """
+    remotes = _list_remotes(repo_path)
+
+    # 1. Per-repo git config override (most specific — wins).
+    try:
+        cfg = subprocess.run(
+            ["git", "config", "--get", "coord-mcp.canonical-remote"],
+            capture_output=True, text=True, cwd=repo_path, timeout=10,
+        )
+        cfg_remote = cfg.stdout.strip() if cfg.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        cfg_remote = ""
+    if cfg_remote and cfg_remote in remotes:
+        ref = _remote_ref_if_exists(repo_path, cfg_remote)
+        if ref:
+            return ref
+
+    # 2. Global env var override.
+    env_remote = os.environ.get("COORD_MCP_REFERENCE_REMOTE")
+    if env_remote and env_remote in remotes:
+        ref = _remote_ref_if_exists(repo_path, env_remote)
+        if ref:
+            return ref
+
+    # 3. Auto-detect: freshest remote ref wins.
+    candidates: list[tuple[str, int]] = []
+    for remote in remotes:
+        ref = _remote_ref_if_exists(repo_path, remote)
+        if ref:
+            epoch = _ref_commit_epoch(repo_path, ref)
+            if epoch >= 0:
+                candidates.append((ref, epoch))
+    if candidates:
+        candidates.sort(key=lambda c: c[1], reverse=True)
+        return candidates[0][0]
+
+    # 4. Fallback — preserves original single-remote behaviour.
+    return f"{_DEFAULT_REFERENCE_REMOTE}/{_DEFAULT_REFERENCE_BRANCH}"
+
+
 def _git_diff_files(repo_path: str) -> list[str]:
-    """Files changed vs origin/main (fallback: vs HEAD~1, then staged+unstaged).
+    """Files changed vs the resolved reference branch (fallback: HEAD~1, then
+    staged+unstaged).
 
     Returns empty list if no changes found at any layer, or if git fails for
     any reason (missing binary, stale NFS, non-git dir, timeout, etc.).
@@ -216,8 +343,9 @@ def _git_diff_files(repo_path: str) -> list[str]:
     (dead NFS mount, broken symlink, missing git) MUST NOT crash the whole
     cascade — hence the broad try/except wrapping `subprocess.run`.
     """
+    reference_ref = resolve_reference_ref(repo_path)
     for cmd in (
-        ["git", "diff", "--name-only", "origin/main...HEAD"],
+        ["git", "diff", "--name-only", f"{reference_ref}...HEAD"],
         ["git", "diff", "--name-only", "HEAD~1"],
         ["git", "diff", "--name-only"],
     ):
@@ -272,14 +400,17 @@ def _list_worktrees(repo_path: str) -> list[dict]:
 
 
 def _head_is_origin_main(repo_path: str) -> bool:
-    """True iff HEAD of `repo_path` points to the same commit as origin/main.
+    """True iff HEAD of `repo_path` points to the same commit as the resolved
+    reference branch (see `resolve_reference_ref` — NOT hardcoded to origin/main,
+    despite the function name kept for backward compatibility).
 
     Used to emit a warning when auto-detect returns an empty diff because the
-    user is sitting on `main` directly (resolves #2).
+    user is sitting on the reference branch directly (resolves #2).
     """
+    reference_ref = resolve_reference_ref(repo_path)
     try:
         result = subprocess.run(
-            ["git", "rev-list", "--count", "origin/main...HEAD"],
+            ["git", "rev-list", "--count", f"{reference_ref}...HEAD"],
             capture_output=True, text=True, cwd=repo_path, timeout=10,
         )
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
@@ -366,10 +497,11 @@ def _auto_detect_diff_files(
     # 3. Fallback: HEAD of the declared repo_path (original behaviour).
     diff = _git_diff_files(repo_path)
 
-    # Issue #2 — warn if empty diff because we're sitting on origin/main.
+    # Issue #2 — warn if empty diff because we're sitting on the reference branch.
     if not diff and _head_is_origin_main(repo_path):
+        reference_ref = resolve_reference_ref(repo_path)
         warnings.append(
-            "HEAD of repo_path is at origin/main (no commits ahead) — diff is empty. "
+            f"HEAD of repo_path is at {reference_ref} (no commits ahead) — diff is empty. "
             "If you expect changes, pass `diff_files` explicitly or commit/checkout "
             "to the feature branch first."
         )
