@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS work_items (
     eta_hours           REAL,
     manifest_path       TEXT,
     outcome             TEXT,
+    triggers_ci         INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
 );
@@ -81,6 +82,13 @@ def now_iso() -> str:
 WORK_ITEMS_COLUMNS = {
     "scope_symbols": "TEXT",
     "scope_symbols_expanded": "TEXT",
+    # CI-concurrency gate (2026-08-27, post Forgejo OOM incident): 1 iff this
+    # work item's checkout is expected to drive a heavy CI run (compile+test,
+    # PR push, runner poll). See work_items._auto_detect_triggers_ci /
+    # work_items._ci_gate. DEFAULT 0 so ALTER TABLE on existing rows is safe —
+    # old rows are conservatively treated as non-CI (never blocks pre-existing
+    # data on migration; new checkins recompute it explicitly).
+    "triggers_ci": "INTEGER NOT NULL DEFAULT 0",
 }
 
 
