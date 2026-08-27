@@ -129,10 +129,16 @@ def checkout_work(
     Auto-detection cascade when `diff_files is None and auto_detect_diff`:
       1. `worktree_path` (explicit override — escape hatch).
       2. Scope-matching worktree (iterates `git worktree list`, picks the one
-         whose diff vs `origin/main` best overlaps declared scope_files).
-         Required for multi-worktree workflows (cf. coord-mcp#4).
+         whose diff vs the resolved reference branch best overlaps declared
+         scope_files). Required for multi-worktree workflows (cf. coord-mcp#4).
       3. Fallback to repo_path HEAD (original behaviour). Emits a warning if
-         HEAD == origin/main and diff is empty (cf. coord-mcp#2).
+         HEAD == reference branch and diff is empty (cf. coord-mcp#2).
+
+    The reference branch is auto-detected per repo, NOT hardcoded to
+    `origin/main` — see `checkout.resolve_reference_ref` (fixes phantom scope
+    conflicts on repos whose canonical remote isn't `origin`, e.g. Forgejo
+    repos with a stale GitHub `origin` mirror). Override via git config
+    `coord-mcp.canonical-remote` or the `COORD_MCP_REFERENCE_REMOTE` env var.
     """
     return checkout(
         work_item_id,
