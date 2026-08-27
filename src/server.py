@@ -60,6 +60,7 @@ def checkin(
     milestone_number: int | None = None,
     eta_hours: float | None = None,
     agent_id: str | None = None,
+    triggers_ci: bool | None = None,
 ) -> dict[str, Any]:
     """Declare intent to work on something. Detects conflicts BEFORE the agent starts.
 
@@ -76,11 +77,27 @@ def checkin(
         milestone_number: GitHub milestone to attach (optional).
         eta_hours: Estimated time to complete (optional).
         agent_id: Identifier (e.g. worktree name) so other agents see who's working.
+        triggers_ci: Does this item's eventual checkout drive a heavy CI run (compile +
+            test, PR push, runner poll)? If omitted, auto-detected from scope_files
+            (`.github/workflows/`, compiled/tested source extensions → True). Pass
+            explicitly to override the guess. Feeds the GLOBAL (cross-repo) CI-concurrency
+            gate — see `ci_gate` in the return value and `checkout_work`'s docstring.
 
     Returns:
         work_item_id, scope_symbols_expanded, gitnexus_warnings, conflicts (overlapping
         active work), similar_existing_issues, suggested_action ('REVIEW_CONFLICTS' /
         'CONSIDER_CLAIMING' / 'CREATE_NEW'). Caller then chooses claim_issue/claim_new/abandon.
+
+        Also: triggers_ci (bool, resolved value) and ci_gate — a SEPARATE signal from
+        `resolution` (which is about scope conflicts). ci_gate.you_should is 'PROCEED'
+        or 'WAIT'. 'WAIT' means the shared CI runner (Forgejo, cross alert-immo AND
+        delpech-infra) is already at its concurrency cap ($COORD_MCP_CI_CONCURRENCY_LIMIT,
+        default 2) — established 2026-08-27 after ~35 simultaneous CI-active work items
+        OOMKilled it. checkin() never blocks on this (it only *declares*, it does not
+        consume a CI slot) — but a 'WAIT' here is an early signal: don't rush to actually
+        trigger CI (push/open a PR) once you start this work, the enforced gate is at
+        `checkout_work`. Respect 'WAIT' — do not treat it as advisory-only noise; see
+        ci_gate.wait_on for which work items to watch for `release_work`.
     """
     return _checkin(
         repo_path=repo_path,
@@ -91,6 +108,7 @@ def checkin(
         milestone_number=milestone_number,
         eta_hours=eta_hours,
         agent_id=agent_id,
+        triggers_ci=triggers_ci,
     )
 
 
@@ -125,6 +143,19 @@ def checkout_work(
     Returns ready_to_merge: bool, warnings: [...], blockers: [...],
     acceptance_criteria_status: {total, checked, unchecked, all_checked},
     open_pr_conflicts_on_files, diff_source.
+
+    ALSO enforces the GLOBAL (cross-repo) CI-concurrency gate — `triggers_ci`
+    (resolved at checkin) and `ci_gate` in the result. If `ci_gate.you_should
+    == "WAIT"` (shared CI runner at cap — $COORD_MCP_CI_CONCURRENCY_LIMIT,
+    default 2), status is NOT transitioned to 'checked_out': it stays at its
+    prior status, `blockers` explains why, and `ready_to_merge` is False.
+    THIS IS A MUST-RESPECT SIGNAL, not advisory noise — established
+    2026-08-27 after Forgejo (shared by alert-immo AND delpech-infra)
+    OOMKilled repeatedly from ~35 simultaneous CI-active work items (the K8s
+    node itself was fine at 38% load; Forgejo's own process memory wasn't).
+    Do not work around a 'WAIT' by pushing/opening a PR anyway — retry
+    checkout_work after one of `ci_gate.wait_on`'s work items calls
+    `release_work`, which frees a slot.
 
     Auto-detection cascade when `diff_files is None and auto_detect_diff`:
       1. `worktree_path` (explicit override — escape hatch).

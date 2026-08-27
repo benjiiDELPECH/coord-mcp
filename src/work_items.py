@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -213,6 +214,125 @@ def plan_parallel_waves(repo_path: str) -> dict:
     }
 
 
+# ── CI concurrency gate ──────────────────────────────────────────────
+#
+# Established 2026-08-27 after Forgejo (the Git+CI+registry server shared by
+# alert-immo AND delpech-infra) went OOMKilled repeatedly. Root cause: ~35
+# coord-mcp work items were active simultaneously, each with its own
+# PR/CI-run/runner-poll cycle — the K8s node itself was only at 38% load, but
+# Forgejo's own process memory was saturated. The doctrine that should have
+# prevented this already existed (Graphiti alert_immo memory
+# `feedback_parallelisme_agents_vs_parallelisme_ci`: "4-5 agents OK, CI
+# lourdes simultanées max 1-2") but was only a rule the orchestrator had to
+# remember to apply — nothing enforced it mechanically. This is that
+# mechanical barrier, in the spirit of `feedback_doctrine_must_be_mechanical`.
+
+_CI_TRIGGER_PATH_PREFIXES = (".github/workflows/",)
+_CI_TRIGGER_EXTENSIONS = {
+    # Backend (compiled + tested)
+    ".py", ".kt", ".kts", ".java",
+    # Frontend (built + tested)
+    ".ts", ".tsx", ".vue", ".js", ".jsx",
+    # Other compiled/tested application code seen in this org's repos
+    ".go", ".rs",
+    # DB migrations (Flyway) — historically drive integration-test CI
+    ".sql",
+    # Build config that changes what CI compiles
+    ".gradle",
+}
+
+_DEFAULT_CI_CONCURRENCY_LIMIT = 2
+
+
+def _auto_detect_triggers_ci(scope_files: list[str]) -> bool:
+    """Best-effort heuristic: will this work item's checkout likely drive a
+    heavy CI run (compile + test suite, PR push, runner poll)?
+
+    True if any declared file is a GitHub Actions workflow definition, or has
+    an extension associated with compiled/tested application code. False for
+    pure docs/config (`.md`, most top-level dotfiles) — deliberately narrow:
+    a caller who KNOWS their change triggers CI (or knows it does NOT, despite
+    matching the heuristic — e.g. a `.py` file that's actually a one-off local
+    script never touched by CI) should pass `triggers_ci` explicitly at
+    checkin rather than rely on this guess. The heuristic is a default, not
+    an override — see `checkin`'s `triggers_ci` parameter.
+    """
+    for f in scope_files:
+        norm = (f or "").replace("\\", "/").lstrip("/")
+        if any(norm.startswith(p) for p in _CI_TRIGGER_PATH_PREFIXES):
+            return True
+        if Path(norm).suffix.lower() in _CI_TRIGGER_EXTENSIONS:
+            return True
+    return False
+
+
+def _ci_concurrency_limit() -> int:
+    """Configurable via $COORD_MCP_CI_CONCURRENCY_LIMIT, default 2 — matches
+    the doctrine memory cited above ('CI lourdes simultanées max 1-2')."""
+    raw = os.environ.get("COORD_MCP_CI_CONCURRENCY_LIMIT")
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return _DEFAULT_CI_CONCURRENCY_LIMIT
+
+
+def _ci_active_items(conn, exclude_work_item_id: str | None = None) -> list[dict]:
+    """Work items currently `checked_out` with `triggers_ci=1` — GLOBAL across
+    every repo known to this server, not scoped to the caller's repo.
+
+    Global by construction: Forgejo is the single shared CI runner/registry
+    across alert-immo AND delpech-infra, and the 2026-08-26 OOM did not
+    respect repo boundaries — a per-repo cap would not have caught it.
+    """
+    query = (
+        "SELECT id, repo, title, agent_id, created_at FROM work_items "
+        "WHERE status = 'checked_out' AND triggers_ci = 1"
+    )
+    params: list = []
+    if exclude_work_item_id:
+        query += " AND id != ?"
+        params.append(exclude_work_item_id)
+    query += " ORDER BY created_at"
+    return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+
+def _ci_gate(triggers_ci: bool, exclude_work_item_id: str | None = None) -> dict:
+    """CI-concurrency signal for checkin()/checkout(). Same {strategy,
+    you_should, wait_on} shape as `_resolve_priority`, but orthogonal to it: a
+    work item can have zero scope conflicts (`resolution.you_should ==
+    "PROCEED"`) and still need to WAIT here because the shared CI runner is at
+    capacity. `you_should` is one of PROCEED / WAIT — WAIT is a signal only,
+    this function never blocks/sleeps; the caller (agent/orchestrator) is
+    responsible for respecting it before triggering actual CI (pushing
+    commits, opening/updating a PR).
+    """
+    limit = _ci_concurrency_limit()
+    if not triggers_ci:
+        return {"strategy": "not-ci", "you_should": "PROCEED", "wait_on": [],
+                "active_ci_count": 0, "limit": limit}
+    with connection() as conn:
+        active = _ci_active_items(conn, exclude_work_item_id=exclude_work_item_id)
+    if len(active) >= limit:
+        return {
+            "strategy": f"ci-concurrency-cap (global, limit={limit})",
+            "you_should": "WAIT",
+            "wait_on": [a["id"] for a in active],
+            "active_ci_count": len(active),
+            "limit": limit,
+        }
+    return {
+        "strategy": f"ci-concurrency-cap (global, limit={limit})",
+        "you_should": "PROCEED",
+        "wait_on": [],
+        "active_ci_count": len(active),
+        "limit": limit,
+    }
+
+
 def _resolve_priority(conflicts: list[dict]) -> dict:
     """Wait-Die instantiated for checkin-time coordination.
 
@@ -257,6 +377,7 @@ def checkin(
     milestone_number: int | None = None,
     eta_hours: float | None = None,
     agent_id: str | None = None,
+    triggers_ci: bool | None = None,
 ) -> dict:
     """Declare intent to work on something. Returns conflicts + suggestions.
 
@@ -267,6 +388,13 @@ def checkin(
     that pure `scope_files` overlap misses. Best-effort: silently degrades to
     file-only matching if GitNexus is absent or the repo isn't indexed.
 
+    `triggers_ci` (optional): does this work item's eventual checkout drive a heavy
+    CI run (compile + test, PR push, runner poll)? If omitted, auto-detected from
+    `scope_files` via `_auto_detect_triggers_ci` (workflow files / compiled app code
+    extensions → True). Pass explicitly to override the guess in either direction.
+    Feeds `ci_gate` in the result — a GLOBAL (cross-repo) concurrency cap, separate
+    from the per-repo scope-conflict `resolution` field. See `_ci_gate`.
+
     Does NOT mutate GitHub yet. The caller (or the user) then chooses to:
     - claim an existing issue (call `claim_issue`)
     - create a new issue (call `claim_new`)
@@ -276,6 +404,9 @@ def checkin(
     repo_slug = _detect_repo_slug(repo_path_abs)
     scope_files = scope_files or []
     scope_symbols = scope_symbols or []
+    resolved_triggers_ci = (
+        triggers_ci if triggers_ci is not None else _auto_detect_triggers_ci(scope_files)
+    )
 
     expansion = _scope_resolver(Path(repo_path_abs).name, scope_symbols)
     expanded_files = expansion["files"]
@@ -295,17 +426,19 @@ def checkin(
     else:
         graphiti_result = {"nodes": [], "warnings": ["repo has no known Graphiti group_id — skipped"]}
 
+    ci_gate = _ci_gate(resolved_triggers_ci)
+
     wi_id = _generate_id()
     with connection() as conn:
         conn.execute(
             "INSERT INTO work_items "
             "(id, repo, title, scope_files, scope_symbols, scope_symbols_expanded, "
             " scope_adr_topic, milestone_number, agent_id, status, eta_hours, "
-            " created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'declared', ?, ?, ?)",
+            " triggers_ci, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'declared', ?, ?, ?, ?)",
             (wi_id, repo_path_abs, title, json.dumps(scope_files), json.dumps(scope_symbols),
              json.dumps(expanded_files), scope_adr_topic, milestone_number, agent_id,
-             eta_hours, now_iso(), now_iso()),
+             eta_hours, int(resolved_triggers_ci), now_iso(), now_iso()),
         )
 
     result = {
@@ -318,6 +451,8 @@ def checkin(
         "gitnexus_warnings": expansion["warnings"],
         "conflicts": conflicts,
         "resolution": _resolve_priority(conflicts),
+        "triggers_ci": resolved_triggers_ci,
+        "ci_gate": ci_gate,
         "similar_existing_issues": similar_issues,
         "graphiti_prior_decisions": [
             {"name": n.get("name"), "summary": n.get("summary")} for n in graphiti_result["nodes"]

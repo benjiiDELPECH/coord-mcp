@@ -19,12 +19,12 @@ Born out of a real incident: three collisions in a single day between two parall
 
 | Tool | Phase | Purpose |
 |---|---|---|
-| `checkin` | departure | Declare scope, detect conflicts via overlap on `scope_files`, suggest existing issues |
+| `checkin` | departure | Declare scope, detect conflicts via overlap on `scope_files`, suggest existing issues, resolve `triggers_ci` |
 | `claim_issue` | departure | Bind work item to existing GitHub issue (assigns @me) |
 | `claim_new` | departure | Create new GitHub issue + bind |
 | `claim_adr_number` | atomic | Allocate next free ADR number (UNIQUE + retry) |
-| `checkout_work` | arrival | Validate diff vs scope, detect parallel PRs, parse AC |
-| `release_work` | arrival | Close work item with outcome, optionally close GH issue |
+| `checkout_work` | arrival | Validate diff vs scope, detect parallel PRs, parse AC, enforce global CI-concurrency gate |
+| `release_work` | arrival | Close work item with outcome, optionally close GH issue, frees a CI-concurrency slot |
 | `abandon_work` | arrival | Mark declared item as abandoned |
 | `list_active_work` | visibility | All non-terminal work items, optionally per-repo |
 | `get_work` | visibility | Inspect single work item by id |
@@ -100,6 +100,18 @@ mcp__coord-mcp__claim_adr_number(
 3. … do the work …
 4. **checkout_work** — gate before merge : validates diff vs scope, finds parallel PRs.
 5. **release_work** — close cycle with outcome summary.
+
+## CI-concurrency gate
+
+Established 2026-08-27 after Forgejo (the shared Git+CI+registry server across alert-immo AND delpech-infra) went OOMKilled repeatedly — root cause: ~35 coord-mcp work items active simultaneously, each driving its own PR/CI-run/runner-poll cycle. A mechanical cap, not a rule agents have to remember:
+
+- `checkin(..., triggers_ci: bool | None = None)` — auto-detected from `scope_files` if omitted (workflow files, compiled/tested source extensions), overridable explicitly. Result carries `ci_gate: {strategy, you_should: "PROCEED"|"WAIT", wait_on, active_ci_count, limit}` — separate from `resolution` (scope conflicts).
+- `checkout_work` enforces it: if `ci_gate.you_should == "WAIT"`, the status transition to `checked_out` is withheld (no CI slot consumed), `ready_to_merge=False`, `blockers` names which work items to wait on.
+- The counter is **global across every repo** — counts `status='checked_out'` rows with `triggers_ci=1`, no `repo` filter. The 2026-08-26 OOM did not respect repo boundaries; neither does this cap.
+- Threshold: `$COORD_MCP_CI_CONCURRENCY_LIMIT`, default **2**.
+- Non-blocking by design: coord-mcp never sleeps/polls waiting for a slot — it returns the `WAIT` signal immediately. The caller (agent/orchestrator) is responsible for respecting it before pushing commits / opening a PR. `release_work` frees a slot for the next queued `checkout_work`.
+
+See `tests/test_ci_concurrency.py` and the doctrine block in `CLAUDE.md`/`AGENTS.md`.
 
 ## Data layout
 

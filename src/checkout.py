@@ -6,12 +6,26 @@ checkout(work_item_id, diff_files?) :
     - Searches for OTHER active work_items whose scope overlaps the actual diff
       (parallel work that might conflict at merge time).
     - Detects open PRs touching the same files (cross-team coordination).
+    - Enforces the GLOBAL CI-concurrency gate (see work_items._ci_gate): if this
+      item's `triggers_ci` is true and the shared CI runner is already at the
+      configured cap ($COORD_MCP_CI_CONCURRENCY_LIMIT, default 2, cross-repo),
+      the status transition to `checked_out` is WITHHELD — the item stays at
+      its current status, `ci_gate.you_should == "WAIT"`, and `blockers` names
+      the work items to wait on. Established 2026-08-27 after Forgejo (shared
+      Git+CI+registry across alert-immo AND delpech-infra) went OOMKilled from
+      ~35 simultaneously CI-active work items. Retry checkout_work once one of
+      them calls `release`. This is advisory, not a server-side block: the
+      call returns immediately either way, it's the caller's responsibility to
+      respect a WAIT signal instead of pushing/opening a PR anyway.
     - Returns ready_to_merge boolean + warnings + blockers.
 
 release(work_item_id, outcome, close_github_issue?) :
     - Marks the work_item as released, stores outcome summary.
     - Optionally closes the linked GitHub issue with a comment.
     - Audit-logs the closure.
+    - Frees a global CI-concurrency slot if this item had `triggers_ci=True`
+      and was `checked_out` (see checkout() above) — the next queued
+      checkout_work's `_ci_gate` recount will see one fewer active item.
 """
 
 from __future__ import annotations
@@ -23,7 +37,7 @@ from pathlib import Path
 
 from . import graphiti_bridge
 from .db import connection, log_audit, now_iso
-from .work_items import _detect_repo_slug, _gh, _row_to_dict, ACTIVE_STATUSES
+from .work_items import _ci_gate, _detect_repo_slug, _gh, _row_to_dict, ACTIVE_STATUSES
 
 
 def checkout(
@@ -48,6 +62,10 @@ def checkout(
     shared across repos with different canonical remotes (e.g. a repo whose
     canonical remote is `forgejo`, with `origin` as a stale GitHub mirror).
     See `resolve_reference_ref` for the resolution order.
+
+    Also enforces the global CI-concurrency gate (`ci_gate` in the result) —
+    see module docstring above. If `ci_gate.you_should == "WAIT"`, the status
+    transition to `checked_out` does NOT happen; retry after a `release`.
     """
     with connection() as conn:
         row = conn.execute("SELECT * FROM work_items WHERE id = ?", (work_item_id,)).fetchone()
@@ -111,12 +129,31 @@ def checkout(
     if item.get("github_issue_number") and repo_slug:
         ac_status = _parse_acceptance_criteria(repo_slug, item["github_issue_number"])
 
+    # 5. Global CI-concurrency gate. Independent from `blockers`/`parallel_conflicts`
+    # above (scope-level, per-repo): this is a cross-repo capacity signal on the
+    # SHARED CI runner. self is excluded from the active count it's compared
+    # against (a work item can't be its own competitor for a slot).
+    triggers_ci = bool(item.get("triggers_ci"))
+    ci_gate = _ci_gate(triggers_ci, exclude_work_item_id=work_item_id)
+    if ci_gate["you_should"] == "WAIT":
+        blockers.append(
+            f"CI concurrency cap reached ({ci_gate['active_ci_count']}/{ci_gate['limit']} "
+            f"checked_out CI-triggering work items, global across repos) — wait on "
+            f"{ci_gate['wait_on']} to release before retrying checkout_work"
+        )
+        # Do NOT transition to checked_out — that would consume/claim a CI slot
+        # this gate just said isn't available. Leave status as-is so a retried
+        # checkout_work (after a release_work frees a slot) can still succeed.
+        new_status = item["status"]
+    else:
+        new_status = "checked_out"
+
     ready_to_merge = not blockers
 
     with connection() as conn:
         conn.execute(
-            "UPDATE work_items SET status='checked_out', updated_at=? WHERE id=?",
-            (now_iso(), work_item_id),
+            "UPDATE work_items SET status=?, updated_at=? WHERE id=?",
+            (new_status, now_iso(), work_item_id),
         )
 
     result = {
@@ -130,9 +167,11 @@ def checkout(
         "parallel_conflicts": parallel_conflicts,
         "open_pr_conflicts_on_files": pr_conflicts,
         "acceptance_criteria_status": ac_status,
+        "triggers_ci": triggers_ci,
+        "ci_gate": ci_gate,
         "warnings": warnings,
         "blockers": blockers,
-        "status": "checked_out",
+        "status": new_status,
     }
     log_audit("checkout",
               args={"work_item_id": work_item_id, "auto_detect_diff": auto_detect_diff,
