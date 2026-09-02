@@ -23,6 +23,7 @@ from pathlib import Path
 
 from . import graphiti_bridge
 from .db import connection, log_audit, now_iso
+from .repo_identity import resoudre_depot
 from .scope_resolver import ScopeResolver, null_resolver
 
 logger = logging.getLogger(__name__)
@@ -104,20 +105,28 @@ def _resolve_milestone_title(repo_slug: str, milestone_number: int) -> str | Non
 
 
 def _detect_repo_slug(repo_path: str) -> str | None:
-    """Get owner/repo from `gh repo view` for the given dir."""
-    result = subprocess.run(
-        ["gh", "repo", "view", "--json", "nameWithOwner"],
-        capture_output=True,
-        text=True,
-        cwd=repo_path,
-        timeout=10,
-    )
-    if result.returncode != 0:
-        return None
-    try:
-        return json.loads(result.stdout).get("nameWithOwner")
-    except json.JSONDecodeError:
-        return None
+    """Nom canonique `proprietaire/depot` — via le port, plus via `gh` en dur.
+
+    AVANT (jusqu'au 02.09.2026) : `gh repo view` appele directement ici, avec un
+    timeout de 10 s. `gh` interroge GitHub ; les depots sont sur Forgejo. L'appel
+    ne trouvait rien et expirait, sur le chemin critique de `checkin`,
+    `checkout_work` et `list_active_work` — les trois outils les plus appeles du
+    serveur.
+
+    Mesure sur les transcriptions d'agents (241 appels) :
+        list_active_work   mediane 0,51 s   p90 60,7 s   max 300 s   13 erreurs
+        checkout_work      mediane 1,67 s   p90 58,5 s   max 311 s    9 erreurs
+        abandon_work       mediane 0,06 s   p90  0,7 s   max   3 s    0 erreur
+    `abandon_work` est le seul qui ne sort pas du processus. Meme langage, meme
+    SQLite, meme serveur : le facteur 5 000 vient de l'appel reseau, pas du code.
+
+    MAINTENANT : `resoudre_depot` essaie d'abord `git remote get-url` (~5 ms,
+    hors ligne, valable pour toute forge), et ne retombe sur `gh` que si le local
+    echoue — ce qui n'arrive pas sur un depot git valide.
+
+    Contrat inchange : rend le slug, ou None. Ne leve pas.
+    """
+    return resoudre_depot(repo_path)
 
 
 def _effective_scope(row) -> set[str]:
