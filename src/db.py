@@ -58,6 +58,20 @@ CREATE TABLE IF NOT EXISTS adr_allocations (
 
 CREATE INDEX IF NOT EXISTS idx_adr_repo ON adr_allocations(repo_path);
 
+CREATE TABLE IF NOT EXISTS migration_allocations (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_path           TEXT NOT NULL,
+    migration_version   INTEGER NOT NULL,
+    description_slug    TEXT NOT NULL,
+    filename            TEXT NOT NULL,
+    work_item_id        TEXT,
+    allocated_to        TEXT,
+    allocated_at        TEXT NOT NULL,
+    UNIQUE (repo_path, migration_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_migration_repo ON migration_allocations(repo_path);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp   TEXT NOT NULL,
