@@ -11,6 +11,8 @@ Exposes :
   - abandon              drop a declared item that won't be done
   - claim_adr_number     atomically allocate the next free ADR number
   - list_adr_allocations cross-repo ADR registry view
+  - claim_migration_number     atomically allocate the next free Flyway VNNN version
+  - list_migration_allocations cross-repo Flyway version registry view
   - audit_tail           last N audit log entries (debug)
 
 Default transport: streamable-http on 127.0.0.1:8015.
@@ -27,6 +29,7 @@ from . import gitnexus_bridge
 from .adr import claim_adr, list_allocations
 from .checkout import abandon, checkout, release
 from .db import connection, init_db
+from .migration import claim_migration, list_allocations as _list_migration_allocations
 from .work_items import (
     checkin as _checkin,
     claim_issue as _claim_issue,
@@ -227,6 +230,47 @@ def claim_adr_number(
 def list_adr_allocations(repo_path: str | None = None) -> list[dict[str, Any]]:
     """Show all ADR allocations known to coord-mcp. Filter by repo if given."""
     return list_allocations(repo_path=repo_path)
+
+
+@mcp.tool()
+def claim_migration_number(
+    repo_path: str,
+    description: str,
+    migrations_dir: str | None = None,
+    work_item_id: str | None = None,
+    allocated_to: str | None = None,
+    create_skeleton: bool = True,
+) -> dict[str, Any]:
+    """Atomically allocate the next free Flyway migration version (VNNN) for a repo.
+
+    Same race, same fix as claim_adr_number: two agents each computing MAX(V*)+1
+    from a stale local checkout collide, and check-migrations-immutable.sh only
+    catches it at merge time of the SECOND colliding PR (after CI already ran).
+    This reserves the version atomically before the file is even written.
+
+    Scans filesystem (`<repo_path>/<migrations_dir>/`, default
+    ai-scraping-service/bootstrap/src/main/resources/db/migration) + DB
+    allocations, picks MAX+1, INSERTs with UNIQUE constraint to serialize
+    concurrent callers. Optionally writes an empty migration file with a
+    header comment (the agent fills in the real SQL — unlike an ADR there's
+    no meaningful skeleton body).
+
+    Returns: migration_version, filename, file_path, slug, created_skeleton, repo, description.
+    """
+    return claim_migration(
+        repo_path=repo_path,
+        description=description,
+        migrations_dir=migrations_dir,
+        work_item_id=work_item_id,
+        allocated_to=allocated_to,
+        create_skeleton=create_skeleton,
+    )
+
+
+@mcp.tool()
+def list_migration_allocations(repo_path: str | None = None) -> list[dict[str, Any]]:
+    """Show all Flyway migration version allocations known to coord-mcp. Filter by repo if given."""
+    return _list_migration_allocations(repo_path=repo_path)
 
 
 # ── Audit ────────────────────────────────────────────────────────────
