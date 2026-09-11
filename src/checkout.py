@@ -2,7 +2,13 @@
 Checkout & release — arrival gate before merge.
 
 checkout(work_item_id, diff_files?) :
-    - Compares actual modified files to declared scope_files (mismatch warning).
+    - Compares the actual diff to the EFFECTIVE scope (declared files ∪ GitNexus
+      expansion of the declared symbols — the SAME perimeter `checkin` computes)
+      and BLOCKS when the diff leaves it.
+    - Blocks when the diff could not be attributed to this work item, and when
+      no impact verdict is attached (symbols declared, expansion empty). A gate
+      that could not measure must not certify — the same fail-closed rule the CI
+      gate applies to `changes`.
     - Searches for OTHER active work_items whose scope overlaps the actual diff
       (parallel work that might conflict at merge time).
     - Detects open PRs touching the same files (cross-team coordination).
@@ -22,7 +28,13 @@ from pathlib import Path
 
 from . import graphiti_bridge
 from .db import connection, log_audit, now_iso
-from .work_items import _detect_repo_slug, _gh, _row_to_dict, ACTIVE_STATUSES
+from .work_items import (
+    ACTIVE_STATUSES,
+    _detect_repo_slug,
+    _effective_scope,
+    _gh,
+    _row_to_dict,
+)
 
 
 def checkout(
@@ -48,6 +60,16 @@ def checkout(
 
     item = _row_to_dict(row)
     declared = set(item.get("scope_files") or [])
+    # Périmètre EFFECTIF = déclaré ∪ expansion GitNexus des symboles. C'est LA
+    # MÊME définition que `checkin`, `_find_conflicts` et `plan_parallel_waves`
+    # utilisent déjà — la porte d'arrivée était le SEUL chemin à ne comparer que
+    # `scope_files`. Deux conséquences : elle ignorait la surface que le checkin
+    # avait lui-même calculée, et elle devenait MUETTE dès qu'un agent ne
+    # déclarait que des symboles (`scope_files` vide ⇒ `out_of_scope` vide par
+    # construction ⇒ aucun contrôle, donc un feu vert gratuit).
+    effective = _effective_scope(row)
+    symbols = json.loads(row["scope_symbols"] or "[]")
+    expanded = json.loads(row["scope_symbols_expanded"] or "[]")
     repo_path = item["repo"]
     repo_slug = _detect_repo_slug(repo_path)
 
@@ -66,12 +88,42 @@ def checkout(
     actual = set(diff_files)
 
     # 1. Scope mismatch
-    out_of_scope = actual - declared if declared else set()
+    out_of_scope = actual - effective if effective else set()
     missed = declared - actual if declared else set()
-    if declared and out_of_scope:
-        warnings.append(f"Out-of-scope edits ({len(out_of_scope)} files): {sorted(out_of_scope)[:5]}…")
+    if effective and out_of_scope:
+        blockers.append(
+            f"Hors périmètre ({len(out_of_scope)} fichier(s) ni déclarés ni dans "
+            f"le rayon d'impact) : {sorted(out_of_scope)[:5]}"
+        )
     if declared and missed:
         warnings.append(f"Declared but untouched ({len(missed)} files): {sorted(missed)[:5]}…")
+
+    # 1bis. Aucun verdict d'impact attaché : l'agent a déclaré des symboles et
+    # l'expansion n'en a ramené AUCUN. Le périmètre se réduit alors aux seuls
+    # fichiers déclarés — le régime « globs » que le checkin existe pour
+    # dépasser. Le résolveur GitNexus est branché par défaut côté serveur
+    # (`work_items.set_scope_resolver`, appelé par `server.py`), donc cet état
+    # signale une expansion qui a échoué, pas un mode de fonctionnement normal.
+    if symbols and not expanded:
+        blockers.append(
+            f"Aucun verdict d'impact attaché : {len(symbols)} symbole(s) déclaré(s) "
+            f"{symbols[:3]} mais expansion GitNexus vide — périmètre non vérifiable "
+            "(repli sur les seuls fichiers déclarés). Résolvez les symboles, ou "
+            "déclarez les fichiers, avant de merger."
+        )
+
+    # 1ter. Diff vide et non attribuable. La cascade n'a pas trouvé le worktree
+    # correspondant et est retombée sur le HEAD du checkout principal, qui n'a
+    # produit AUCUN fichier : la porte n'a rien mesuré. Même règle que le job
+    # `changes` de la porte CI (`docs/reality/patches-main-2026-09-11/0001`) —
+    # un run où rien n'a tourné ne publie pas un feu vert.
+    if diff_source == "repo-fallback" and not actual:
+        blockers.append(
+            "Diff vide et non attribuable : la détection est retombée sur le HEAD "
+            "du checkout principal sans trouver les changements de ce work item. "
+            "Passez `worktree_path` (ou `diff_files`) explicitement — la porte ne "
+            "certifie pas un diff qu'elle n'a pas mesuré."
+        )
 
     # 2. Conflict detection vs OTHER active work items
     parallel_conflicts = []
@@ -81,7 +133,10 @@ def checkout(
             (repo_path, work_item_id, *ACTIVE_STATUSES),
         ).fetchall()
     for other in rows:
-        other_files = set(json.loads(other["scope_files"] or "[]"))
+        # Même définition que `_find_conflicts` (work_items.py). Sans ça la
+        # porte d'arrivée était sémantiquement aveugle d'un seul côté : elle
+        # voyait la surface étendue de l'appelant, pas celle des autres items.
+        other_files = _effective_scope(other)
         overlap = actual & other_files
         if overlap:
             parallel_conflicts.append({
@@ -119,6 +174,8 @@ def checkout(
         "diff_source": diff_source,
         "out_of_scope_count": len(out_of_scope),
         "untouched_declared_count": len(missed),
+        "effective_scope_count": len(effective),
+        "impact_verdict_attached": bool(expanded),
         "parallel_conflicts": parallel_conflicts,
         "open_pr_conflicts_on_files": pr_conflicts,
         "acceptance_criteria_status": ac_status,
