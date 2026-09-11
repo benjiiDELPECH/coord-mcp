@@ -65,6 +65,11 @@ CACHE_TTL_S = 300.0
 # c'est la seule clé d'invalidation correcte. On la relit au plus toutes les 30 s.
 INDEX_REV_TTL_S = 30.0
 
+# P1bis — durée de validité du schéma des outils (`tools/list`). Le jeu d'outils
+# ne bouge qu'à la mise à jour du serveur : 300 s suffit, et une clé refusée à
+# tort coûterait un appel d'expansion.
+SCHEMA_TTL_S = 300.0
+
 # Parallélisation : MESURÉE PUIS REVERTÉE (voir `expand_scope`). Conservée ici
 # comme trace de ce qui a été essayé — la passer à >1 dégrade le temps réel.
 EXPANSION_MAX_WORKERS = 1
@@ -101,6 +106,14 @@ def service_enabled() -> bool:
 _INFLIGHT: dict[tuple[str, str, int], threading.Lock] = {}
 _INDEX_REV: dict[str, tuple[float, str]] = {}
 
+# Schéma des outils MCP : outil -> clés d'arguments admises. Sert de garde-fou
+# contre le piège mesuré le 11/09/2026 (issue GitNexus #3261) : une clé
+# inconnue est IGNORÉE SANS ERREUR, le serveur applique son défaut, et l'appel
+# rend une réponse plausible à une question qu'on n'a pas posée.
+_SCHEMA: dict[str, frozenset[str]] = {}
+_SCHEMA_AT: list[float] = [0.0]
+_SCHEMA_LOCK = threading.Lock()
+
 
 def _reset_cache() -> None:
     """Vide le cache — utilisé par les tests pour garantir la déterminisme."""
@@ -108,6 +121,9 @@ def _reset_cache() -> None:
         _CACHE.clear()
         _INFLIGHT.clear()
         _INDEX_REV.clear()
+    with _SCHEMA_LOCK:
+        _SCHEMA.clear()
+        _SCHEMA_AT[0] = 0.0
     with _SESSION_LOCK:
         _SESSION["id"] = None
 
@@ -215,6 +231,74 @@ def _loads_first_json(text: str) -> dict | None:
         return None
 
 
+def _schema_outils() -> dict[str, frozenset[str]] | None:
+    """Clés d'arguments admises par outil, lues dans `tools/list` du service.
+
+    INDÉTERMINÉ ⇒ ON LAISSE PASSER. Ce garde-fou ne refuse que ce qu'il SAIT
+    faux. Service muet, `tools/list` sans réponse, outil non décrit, schéma sans
+    `properties` : on rend `None` et l'appel part comme avant. Bloquer sur une
+    impossibilité de vérifier transformerait une panne de vérification en panne
+    d'outil — strictement pire que le mal visé.
+    """
+    if not service_enabled():
+        return None
+    now = time.monotonic()
+    with _SCHEMA_LOCK:
+        if _SCHEMA and _SCHEMA_AT[0] > now:
+            return dict(_SCHEMA)
+
+    session = _service_session()
+    if not session:
+        return None
+    data, _ = _rpc(
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}},
+        session,
+    )
+    if not data:
+        return None
+    result = data.get("result") or {}
+    outils = result.get("tools")
+    if not isinstance(outils, list):
+        return None
+
+    connues: dict[str, frozenset[str]] = {}
+    for outil in outils:
+        if not isinstance(outil, dict):
+            continue
+        nom = outil.get("name")
+        schema = outil.get("inputSchema") or outil.get("input_schema")
+        props = schema.get("properties") if isinstance(schema, dict) else None
+        if isinstance(nom, str) and isinstance(props, dict):
+            connues[nom] = frozenset(props.keys())
+    if not connues:
+        return None
+    with _SCHEMA_LOCK:
+        _SCHEMA.clear()
+        _SCHEMA.update(connues)
+        _SCHEMA_AT[0] = now + SCHEMA_TTL_S
+    return dict(_SCHEMA)
+
+
+def _cle_inconnue(outil: str, arguments: dict) -> str | None:
+    """Première clé d'`arguments` absente du schéma de `outil`, sinon `None`.
+
+    `None` couvre volontairement DEUX cas que l'appelant n'a pas à distinguer :
+    « toutes les clés sont connues » et « on n'a pas pu vérifier ». Les deux
+    mènent au même comportement — laisser partir l'appel. Seul le refus certain
+    est distingué, et c'est le seul qui bloque.
+    """
+    schema = _schema_outils()
+    if not schema:
+        return None
+    connues = schema.get(outil)
+    if connues is None:
+        return None
+    for cle in arguments:
+        if cle not in connues:
+            return cle
+    return None
+
+
 def _index_revision(repo_alias: str) -> str | None:
     """Révision de l'index GitNexus pour ce dépôt : `lastCommit@indexedAt`.
 
@@ -289,30 +373,49 @@ def _service_impact(repo_alias: str, symbol: str, depth: int) -> tuple[list[str]
             _SESSION["id"] = None  # session périmée : on réessaiera au prochain appel
         return None
 
+    arguments = {
+        "target": symbol,
+        "repo": repo_alias,
+        "direction": "downstream",
+        # ⚠️ `maxDepth`, PAS `depth`. Le schéma de l'outil MCP déclare
+        # `maxDepth` (défaut 3, borné 1–32) ; un argument `depth` est
+        # simplement IGNORÉ — sans erreur — et le serveur applique son
+        # défaut. Mesuré le 11/09/2026 sur AnalysisRunStore :
+        #   CLI --depth 1/2/3      → 5 / 42 / 47 entrées
+        #   service depth:1/2/3    → 47 / 47 / 47   (argument ignoré)
+        #   service maxDepth:1/2/3 → 5 / 42 / 47   (équivalence EXACTE)
+        # C'est ce qui faisait croire à une « divergence » entre les deux
+        # voies : c'était un nom d'argument faux, pas une traversée
+        # différente. Un test verrouille le nom ci-dessous, et le garde-fou
+        # `_cle_inconnue` en fait désormais une erreur au lieu d'un silence.
+        "maxDepth": depth,
+    }
+
+    # Garde-fou de SCHÉMA, avant l'envoi. Le commentaire ci-dessus protégeait par
+    # la documentation ; il ne protégeait pas le prochain qui écrirait `depth`.
+    # Ici on confronte les clés au schéma que le serveur publie lui-même : une
+    # clé inconnue serait ignorée sans erreur, le serveur appliquerait son défaut,
+    # et on croirait avoir demandé une chose pour en obtenir une autre
+    # (issue GitNexus #3261). On refuse NOUS-MÊMES, avec un motif lisible.
+    #
+    # Et on ne bascule PAS sur la CLI : le repli CLI réussirait silencieusement
+    # avec une autre traversée (`--depth` y est honoré), ce qui masquerait
+    # exactement le défaut qu'on veut voir. Un refus doit rester visible.
+    inconnue = _cle_inconnue("impact", arguments)
+    if inconnue is not None:
+        return [], (
+            f"{symbol}: clé d'argument {inconnue!r} absente du schéma de l'outil "
+            f"'impact' — appel REFUSÉ. GitNexus ignore silencieusement une clé "
+            f"inconnue et applique son défaut : l'appel parti aurait rendu une "
+            f"réponse plausible à une autre question (issue GitNexus #3261)."
+        )
+
     data, _ = _rpc(
         {
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {
-                "name": "impact",
-                "arguments": {
-                    "target": symbol,
-                    "repo": repo_alias,
-                    "direction": "downstream",
-                    # ⚠️ `maxDepth`, PAS `depth`. Le schéma de l'outil MCP déclare
-                    # `maxDepth` (défaut 3, borné 1–32) ; un argument `depth` est
-                    # simplement IGNORÉ — sans erreur — et le serveur applique son
-                    # défaut. Mesuré le 11/09/2026 sur AnalysisRunStore :
-                    #   CLI --depth 1/2/3      → 5 / 42 / 47 entrées
-                    #   service depth:1/2/3    → 47 / 47 / 47   (argument ignoré)
-                    #   service maxDepth:1/2/3 → 5 / 42 / 47   (équivalence EXACTE)
-                    # C'est ce qui faisait croire à une « divergence » entre les deux
-                    # voies : c'était un nom d'argument faux, pas une traversée
-                    # différente. Un test verrouille le nom ci-dessous.
-                    "maxDepth": depth,
-                },
-            },
+            "params": {"name": "impact", "arguments": arguments},
         },
         session_id,
     )

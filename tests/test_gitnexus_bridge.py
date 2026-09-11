@@ -621,3 +621,183 @@ def test_sans_revision_le_cache_retombe_sur_le_ttl():
             gb.expand_scope("alert-immo", ["X"])
             gb.expand_scope("alert-immo", ["X"])
     assert len(appels) == 1, appels
+
+
+# =============================================================================
+# GARDE-FOU DE SCHÉMA (issue GitNexus #3261) — ajouté le 11/09/2026.
+#
+# Motif : le commentaire de `_service_impact` documentait le piège `depth` /
+# `maxDepth`, mais RIEN ne l'empêchait de se reproduire. Un commentaire n'est pas
+# un garde-fou : le prochain qui écrit `depth` reçoit 200 OK et une réponse
+# plausible à une autre question. Ces tests prouvent que le pont refuse
+# désormais, au lieu de laisser le serveur ignorer la clé en silence.
+# =============================================================================
+_SCHEMA_REEL = {
+    "impact": frozenset({"target", "repo", "direction", "maxDepth", "mode",
+                         "line", "file_path", "kind", "crossDepth",
+                         "relationTypes", "includeTests", "minConfidence"}),
+    "list_repos": frozenset(),
+}
+# NB : ce schéma est un SOUS-ENSEMBLE volontaire. Le schéma réel du serveur
+# (1.6.11, :8006) déclare 24 clés pour `impact` — mesuré le 11/09/2026 :
+# tools/list lu en 150 ms, 17 outils. Un test qui dépendrait du schéma vivant
+# signalerait une mise à jour du serveur comme une régression.
+
+
+def _schema_impact(cle_depth="maxDepth"):
+    """Schéma minimal dont le nom de la clé de profondeur est paramétrable.
+
+    `cle_depth="profondeur"` simule un serveur qui ne déclare PAS la clé qu'on
+    lui envoie — la situation exacte qui a produit la fausse « divergence
+    CLI/service » : l'argument partait, n'était lu par personne, et le serveur
+    appliquait son défaut de 3 niveaux.
+    """
+    return {"impact": frozenset({"target", "repo", "direction", cle_depth})}
+
+
+def test_schema_outils_lit_name_et_inputschema():
+    """`tools/list` -> {outil: clés}. Source de vérité = le serveur, pas une liste en dur."""
+    reponse = {"result": {"tools": [
+        {"name": "impact", "inputSchema": {"properties": {"target": {}, "maxDepth": {}}}},
+        {"name": "list_repos", "inputSchema": {"properties": {}}},
+    ]}}
+    with patch.object(gb, "service_enabled", return_value=True):
+        with patch.object(gb, "_service_session", return_value="sid"):
+            with patch.object(gb, "_rpc", return_value=(reponse, "sid")):
+                schema = gb._schema_outils()
+    assert schema == {"impact": frozenset({"target", "maxDepth"}), "list_repos": frozenset()}
+
+
+def test_schema_sans_properties_est_indetermine():
+    """Un outil décrit sans `properties` n'autorise aucune conclusion."""
+    reponse = {"result": {"tools": [{"name": "impact"}]}}
+    with patch.object(gb, "service_enabled", return_value=True):
+        with patch.object(gb, "_service_session", return_value="sid"):
+            with patch.object(gb, "_rpc", return_value=(reponse, "sid")):
+                assert gb._schema_outils() is None
+
+
+def test_schema_est_mis_en_cache():
+    """Sinon on paierait un aller-retour de plus à CHAQUE symbole."""
+    appels = []
+    reponse = {"result": {"tools": [
+        {"name": "impact", "inputSchema": {"properties": {"target": {}}}}]}}
+
+    def _capture(payload, session_id):
+        appels.append(payload.get("method"))
+        return reponse, "sid"
+
+    with patch.object(gb, "service_enabled", return_value=True):
+        with patch.object(gb, "_service_session", return_value="sid"):
+            with patch.object(gb, "_rpc", side_effect=_capture):
+                gb._schema_outils()
+                gb._schema_outils()
+    assert appels == ["tools/list"], f"le schéma a été relu : {appels}"
+
+
+def test_cle_inconnue_rend_none_quand_tout_est_connu():
+    with patch.object(gb, "_schema_outils", return_value=_SCHEMA_REEL):
+        assert gb._cle_inconnue("impact", {"target": "X", "maxDepth": 2}) is None
+
+
+def test_cle_inconnue_nomme_la_cle_fautive():
+    with patch.object(gb, "_schema_outils", return_value=_SCHEMA_REEL):
+        assert gb._cle_inconnue("impact", {"target": "X", "depth": 2}) == "depth"
+
+
+def test_cle_inconnue_est_indeterminee_sans_schema():
+    """Vérification impossible ⇒ on LAISSE PASSER.
+
+    Bloquer sur un doute transformerait une panne de vérification en panne
+    d'outil : un agent empêché de coordonner coderait sans aucune coordination,
+    strictement pire que coordonner sur une surface non vérifiée.
+    """
+    with patch.object(gb, "_schema_outils", return_value=None):
+        assert gb._cle_inconnue("impact", {"depth": 2}) is None
+
+
+def test_service_impact_refuse_une_cle_absente_du_schema_et_n_envoie_rien():
+    """LE test de non-régression du piège.
+
+    Schéma qui ne déclare pas la clé envoyée ⇒ refus, et AUCUN `tools/call` émis.
+    Sans ce garde-fou l'appel partait, GitNexus l'ignorait, et on recevait une
+    réponse plausible à une autre question.
+    """
+    envoyes = []
+
+    def _capture(payload, session_id):
+        envoyes.append(payload)
+        return {"result": {"content": [
+            {"type": "text", "text": '{"target": {"filePath": "a.kt"}}'}]}}, "sid"
+
+    with patch.object(gb, "service_enabled", return_value=True):
+        with patch.object(gb, "_service_session", return_value="sid"):
+            with patch.object(gb, "_schema_outils", return_value=_schema_impact(cle_depth="profondeur")):
+                with patch.object(gb, "_rpc", side_effect=_capture):
+                    files, warning = gb._service_impact("alert-immo", "X", 2)
+
+    assert files == []
+    assert warning and "REFUS" in warning.upper(), warning
+    assert "maxDepth" in warning, f"le motif doit nommer la clé fautive : {warning}"
+    assert not [p for p in envoyes if p.get("method") == "tools/call"], (
+        "un tools/call a été émis alors que la clé est absente du schéma")
+
+
+def test_le_refus_ne_bascule_pas_sur_la_cli():
+    """Un refus de schéma ne doit PAS être masqué par le repli CLI.
+
+    Le repli réussirait silencieusement avec une autre traversée (`--depth` y est
+    honoré) : le défaut deviendrait invisible, ce qui est le mal exact qu'on
+    corrige. Le refus doit rester visible dans les avertissements.
+    """
+    with patch.object(gb, "service_enabled", return_value=True):
+        with patch.object(gb, "_index_revision", return_value=None):
+            with patch.object(gb, "_schema_outils", return_value=_schema_impact(cle_depth="profondeur")):
+                with patch.object(subprocess, "run") as mock_run:
+                    result = gb.expand_scope("alert-immo", ["X"])
+    mock_run.assert_not_called()
+    assert any("REFUS" in w.upper() for w in result["warnings"]), result["warnings"]
+
+
+def test_service_impact_part_quand_le_schema_confirme_la_cle():
+    """CONTRE-ÉPREUVE : schéma conforme ⇒ l'appel DOIT partir.
+
+    Sans elle, un garde-fou qui refuse tout passerait le test précédent.
+    """
+    envoyes = []
+
+    def _capture(payload, session_id):
+        envoyes.append(payload)
+        return {"result": {"content": [
+            {"type": "text", "text": '{"target": {"filePath": "a.kt"}}'}]}}, "sid"
+
+    with patch.object(gb, "service_enabled", return_value=True):
+        with patch.object(gb, "_service_session", return_value="sid"):
+            with patch.object(gb, "_schema_outils", return_value=_SCHEMA_REEL):
+                with patch.object(gb, "_rpc", side_effect=_capture):
+                    files, warning = gb._service_impact("alert-immo", "X", 2)
+
+    appels = [p for p in envoyes if p.get("method") == "tools/call"]
+    assert appels, "aucun tools/call émis alors que le schéma est conforme"
+    assert appels[0]["params"]["arguments"]["maxDepth"] == 2
+    assert warning is None
+    assert files == ["a.kt"]
+
+
+def test_service_impact_part_quand_le_schema_est_indetermine():
+    """Service joignable mais schéma illisible ⇒ l'appel part (fail-open assumé)."""
+    envoyes = []
+
+    def _capture(payload, session_id):
+        envoyes.append(payload)
+        return {"result": {"content": [
+            {"type": "text", "text": '{"target": {"filePath": "a.kt"}}'}]}}, "sid"
+
+    with patch.object(gb, "service_enabled", return_value=True):
+        with patch.object(gb, "_service_session", return_value="sid"):
+            with patch.object(gb, "_schema_outils", return_value=None):
+                with patch.object(gb, "_rpc", side_effect=_capture):
+                    files, warning = gb._service_impact("alert-immo", "X", 2)
+
+    assert [p for p in envoyes if p.get("method") == "tools/call"], "fail-open non respecté"
+    assert files == ["a.kt"]
