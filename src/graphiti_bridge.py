@@ -20,7 +20,17 @@ import asyncio
 import concurrent.futures
 
 GRAPHITI_URL = "http://localhost:8001/mcp/"
-GRAPHITI_TIMEOUT_S = 10
+# Réduit de 10s à 2.5s le 2026-08-30 : _run_sync() ci-dessous bloque le thread
+# de boucle événementielle du serveur FastMCP entier (pas juste l'appel en
+# cours) pendant toute la durée de ce timeout — confirmé en lisant _run_sync,
+# et par la mesure empirique de tool_use->tool_result sur mcp__coord-mcp__*
+# (jusqu'à 623s de latence max, cohérent avec ~60 agents empilés derrière des
+# appels à 10s chacun). Root cause d'un deadlock+crash réel ce matin (coord-mcp
+# injoignable ~10:15, process mort, relancé par launchd). Ces appels sont
+# documentés best-effort/jamais bloquants par design (cf. docstring du module)
+# — réduire le pire cas ne change aucune garantie fonctionnelle, juste le
+# plafond de dégradation sous forte concurrence.
+GRAPHITI_TIMEOUT_S = 2.5
 
 # Canonical group_ids (underscores — RediSearch/FalkorDB FTS treats "-" as negation).
 _REPO_TO_GROUP_ID = {
