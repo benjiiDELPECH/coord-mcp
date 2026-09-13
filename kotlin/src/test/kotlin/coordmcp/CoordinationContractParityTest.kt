@@ -184,7 +184,27 @@ class CoordinationContractParityTest {
     }
 
     /**
-     * Niveau 2 — le cas que la compatibilité transitoire doit REFUSER.
+     * Niveau 2 — l'alias `id` SEUL.
+     *
+     * Dernier trou de la table de compatibilité. Il était vérifié à la main en
+     * JSON-RPC brut, ce qui veut dire : non protégé. Un alias qu'aucun test ne
+     * couvre est un alias qu'on peut casser sans le voir — la tolérance est une
+     * promesse de contrat, pas un détail d'implémentation.
+     */
+    @Test
+    fun `get_work accepte id seul comme alias deprecie`() = withClient { client ->
+        val texte = client.appeler(
+            "get_work",
+            buildJsonObject { put("id", "wi_000000000000") },
+        )
+        assertTrue(
+            "manquant ou invalide" !in texte,
+            "`id` seul doit être accepté comme alias DÉPRÉCIÉ de `work_item_id`. " +
+                "Réponse : $texte",
+        )
+    }
+
+    /** Niveau 2 — le cas que la compatibilité transitoire doit REFUSER.
      *
      * Les deux noms avec des valeurs différentes ne peuvent pas être résolus :
      * un `?:` bien intentionné en choisirait un en silence. C'est une erreur.
