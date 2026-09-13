@@ -13,7 +13,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlin.test.Test
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 
 /**
  * Contrat de PROTOCOLE, avec un VRAI client MCP.
@@ -29,6 +29,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
  * Nécessite le service sur 8015. Lancement :
  *   COORD_MCP_LIVE_URL=http://127.0.0.1:8015/mcp gradle test --tests '*ProtocolContractTest*'
  */
+@Tag("live")
 class ProtocolContractTest {
 
     private val url = System.getenv("COORD_MCP_LIVE_URL") ?: "http://127.0.0.1:8015/mcp"
@@ -42,10 +43,9 @@ class ProtocolContractTest {
 
     @Test
     fun `un client MCP reel peut lister ET appeler un outil sans erreur de protocole`() = runBlocking {
-        if (System.getenv("COORD_MCP_REQUIRE_LIVE") == "1") {
-            assertTrue(serviceIsUp(), "COORD_MCP_REQUIRE_LIVE=1 mais aucun service sur $url")
-        } else {
-            assumeTrue(serviceIsUp(), "service MCP absent sur $url — test de protocole ignoré")
+        check(serviceIsUp()) {
+            "liveContractTest exige un service MCP sur $url. Un contrat non " +
+                "vérifié doit être ROUGE, pas vert."
         }
         val http = HttpClient { install(SSE) }
         val client = Client(clientInfo = Implementation(name = "protocol-test", version = "1"))

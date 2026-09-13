@@ -15,7 +15,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 
 /**
  * PARITÉ Python → Kotlin — le contrat des outils de coordination.
@@ -44,6 +44,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
  * Nécessite le service sur 8015 ; sans lui, les tests sont IGNORÉS (et non
  * verts), sinon ils ne prouveraient rien.
  */
+@Tag("live")
 class CoordinationContractParityTest {
 
     private val url = System.getenv("COORD_MCP_LIVE_URL") ?: "http://127.0.0.1:8015/mcp"
@@ -58,7 +59,7 @@ class CoordinationContractParityTest {
     }
 
     private fun withClient(block: suspend (Client) -> Unit): Unit = runBlocking {
-        exigerServiceOuPasser()
+        exigerService()
         val http = HttpClient { install(SSE) }
         val client = Client(clientInfo = Implementation(name = "parity-test", version = "1"))
         try {
@@ -71,18 +72,20 @@ class CoordinationContractParityTest {
     }
 
     /**
-     * Sans service, ces tests se SAUTENT — et une suite qui se saute rend vert.
-     * C'est le motif exact qu'ils existent pour combattre : `outputSchema = null`
-     * était vert conceptuellement et faux à l'exécution.
+     * PLUS DE BRANCHE DE SAUT.
      *
-     * `COORD_MCP_REQUIRE_LIVE=1` transforme le saut en ÉCHEC. La CI le pose :
-     * un contrat qu'on ne vérifie pas faute de service doit être rouge, pas vert.
+     * Ces tests ne vivent que dans la tâche `liveContractTest`, qui exige un
+     * service. Il n'existe donc aucun chemin où ils « passent » sans avoir
+     * vérifié : le saut a été retiré, pas conditionné.
+     *
+     * C'est la leçon du `assumeTrue` d'origine — « si je ne peux pas faire la
+     * vérification critique, considère que tout va bien » — qui était un
+     * faux vert, pas une commodité.
      */
-    private fun exigerServiceOuPasser() {
-        if (System.getenv("COORD_MCP_REQUIRE_LIVE") == "1") {
-            kotlin.test.assertTrue(serviceIsUp(), "COORD_MCP_REQUIRE_LIVE=1 mais aucun service sur $url")
-        } else {
-            assumeTrue(serviceIsUp(), "service MCP absent sur $url — test ignoré (poser COORD_MCP_REQUIRE_LIVE=1 pour l'exiger)")
+    private fun exigerService() {
+        check(serviceIsUp()) {
+            "liveContractTest exige un service MCP sur $url. Un contrat non " +
+                "vérifié doit être ROUGE, pas vert."
         }
     }
 

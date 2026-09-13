@@ -102,8 +102,37 @@ sourceSets {
 }
 
 tasks.test {
-    useJUnitPlatform()
+    // Les tests `live` exigent un service MCP en face. Ils ne sont PAS ici :
+    // une suite qui les inclut doit pouvoir les sauter, et un saut ressemble
+    // à un succès. Une tâche absente, elle, se voit. Ils vivent dans
+    // `liveContractTest`.
+    useJUnitPlatform { excludeTags("live") }
     // Audit sur données réelles : opt-in, lit une COPIE de la base.
     environment("COORD_MCP_DB_COPY", System.getenv("COORD_MCP_DB_COPY") ?: "")
+    testLogging { events("passed", "failed", "skipped") }
+}
+
+/**
+ * Contrat VIVANT — exige un service MCP sur COORD_MCP_LIVE_URL.
+ *
+ * Tâche SÉPARÉE, et non variable d'environnement, pour une raison de fond :
+ * une variable s'oublie, une tâche absente se voit. `./gradlew test` ne peut
+ * donc plus produire un vert en ayant sauté la vérification de contrat — il
+ * faut nommer `liveContractTest`, et cette tâche échoue si le service manque.
+ *
+ * Le requirement est posé ICI, pas par l'appelant : aucun appelant ne peut
+ * l'omettre, et aucun test de cette tâche n'a de branche de saut.
+ */
+tasks.register<Test>("liveContractTest") {
+    description = "Exige un service MCP en face. Aucun saut autorisé."
+    group = "verification"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform { includeTags("live") }
+    systemProperty("coordmcp.requireLive", "true")
+    environment(
+        "COORD_MCP_LIVE_URL",
+        System.getenv("COORD_MCP_LIVE_URL") ?: "http://127.0.0.1:8015/mcp",
+    )
     testLogging { events("passed", "failed", "skipped") }
 }
