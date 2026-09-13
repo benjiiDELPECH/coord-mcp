@@ -32,7 +32,7 @@ internal class WorkCommandTools(
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
                     putJsonObject("work_item_id") { put("type", "string") }
-                    putJsonObject("lesson") {
+                    putJsonObject("outcome") {
                         put("type", "string")
                         put(
                             "description",
@@ -59,7 +59,15 @@ internal class WorkCommandTools(
                 ?: return@addTool McpTooling.text(
                     WorkToolJson.invalidArgument("work_item_id illisible"),
                 )
-            val lesson = McpTooling.arg(args, "lesson").orEmpty()
+            val lesson = when (val o = McpTooling.aliasedTextArg(args, "outcome", "lesson")) {
+                McpTooling.TextArg.Absent -> ""
+                is McpTooling.TextArg.Present -> o.value
+                is McpTooling.TextArg.Ambiguous -> return@addTool McpTooling.text(
+                    WorkToolJson.invalidArgument(
+                        "outcome et lesson portent des valeurs differentes : ambigu, refuse",
+                    ),
+                )
+            }
             val expected = when (val r = McpTooling.revisionArg(args)) {
                 McpTooling.RevisionArg.Absent -> null
                 McpTooling.RevisionArg.Malformed -> return@addTool McpTooling.text(
@@ -172,6 +180,6 @@ internal class WorkCommandTools(
     private fun render(result: WorkActionResult): String = when (result) {
         WorkActionResult.NotFound -> WorkToolJson.notFound("")
         is WorkActionResult.Refused -> WorkToolJson.refused(result.refusals.joinToString())
-        is WorkActionResult.Done -> WorkToolJson.outcome(result.outcome)
+        is WorkActionResult.Done -> WorkToolJson.outcome(result.outcome, result.status)
     }
 }

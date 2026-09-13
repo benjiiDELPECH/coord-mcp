@@ -1,6 +1,7 @@
 package coordmcp.mcp
 
 import coordmcp.domain.WorkItem
+import coordmcp.domain.WorkStatus
 import coordmcp.domain.WriteOutcome
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.addJsonObject
@@ -52,9 +53,17 @@ internal object WorkToolJson {
         put("detail", detail)
     }
 
-    internal fun outcome(outcome: WriteOutcome): String = when (outcome) {
+    internal fun outcome(outcome: WriteOutcome, status: WorkStatus? = null): String = when (outcome) {
         is WriteOutcome.Applied -> jsonOf {
-            put("work_status", "released")
+            // Le statut RÉEL de l'item, jamais un littéral. `released` était codé
+            // en dur pour toute écriture appliquée : `abandon_work` l'annonçait
+            // donc aussi. JSON valide, digest stable, sens faux — exactement ce
+            // qu'aucun contrôle de forme ne détecte.
+            //
+            // `null` quand l'opération ne change PAS de statut (linkIssue) : on
+            // ne prétend alors rien sur le cycle de vie, on ne rapporte que la
+            // révision. Mieux vaut une absence qu'une affirmation fausse.
+            status?.let { put("work_status", it.storageValue) }
             put("revision", outcome.revision.value)
         }
         is WriteOutcome.StaleRevision -> jsonOf {

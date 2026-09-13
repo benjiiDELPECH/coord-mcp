@@ -114,6 +114,31 @@ class CoordinationContractParityTest {
         )
     }
 
+    /**
+     * Niveau 1 — le SECOND paramètre de `release_work`, et la régression que la
+     * première version de cette suite n'avait PAS attrapée.
+     *
+     * Python : `release_work(work_item_id, outcome, close_github_issue=False)`.
+     * Kotlin : `lesson` à la place d'`outcome`. Un client envoyant `outcome` —
+     * le seul nom qu'il connaisse — recevait `REFUSED: MissingLesson` : un refus
+     * d'argument déguisé en refus métier, donc illisible comme un problème de
+     * contrat.
+     *
+     * Leçon de méthode : vérifier l'identifiant ne suffit pas. Une suite de
+     * parité qui ne teste qu'UN paramètre laisse passer le renommage des autres.
+     */
+    @Test
+    fun `release_work declare outcome, le nom du contrat Python`() = withClient { client ->
+        val tools = client.listTools().tools.associateBy { it.name }
+        val outil = tools["release_work"] ?: error("outil absent : release_work")
+        val props = outil.inputSchema.properties?.keys.orEmpty()
+        assertTrue(
+            "outcome" in props,
+            "release_work doit déclarer `outcome` (contrat Python) et non `lesson`, " +
+                "qui est le nom INTERNE du domaine. Déclaré : $props",
+        )
+    }
+
     /** Niveau 3 — appel réel. Attrape le refus d'enveloppe (-32602). */
     @Test
     fun `list_active_work rend un TABLEAU, pas un objet`() = withClient { client ->

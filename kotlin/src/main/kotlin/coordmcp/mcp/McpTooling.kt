@@ -71,6 +71,37 @@ internal object McpTooling {
     internal fun workItemIdRaw(arg: WorkItemIdArg): String =
         (arg as? WorkItemIdArg.Present)?.raw.orEmpty()
 
+    /**
+     * Un argument TEXTE porté par deux noms — même discipline que l'identifiant.
+     *
+     * `release_work` prend `outcome` selon le contrat Python, mais le domaine
+     * interne l'appelle `lesson`. Le portage a exposé le nom INTERNE dans le
+     * schéma, si bien qu'un client envoyant `outcome` — le seul nom qu'il
+     * connaisse — recevait `REFUSED: MissingLesson`, c'est-à-dire un refus
+     * d'argument déguisé en refus métier. Deux noms, une chose, et le cas où
+     * les deux diffèrent reste une erreur.
+     */
+    internal sealed interface TextArg {
+        data object Absent : TextArg
+        data class Present(val value: String) : TextArg
+        data class Ambiguous(val canonical: String, val alias: String) : TextArg
+    }
+
+    internal fun aliasedTextArg(
+        arguments: Map<String, JsonElement>?,
+        canonical: String,
+        alias: String,
+    ): TextArg {
+        val c = arg(arguments, canonical)
+        val a = arg(arguments, alias)
+        return when {
+            c != null && a != null && c != a -> TextArg.Ambiguous(c, a)
+            c != null -> TextArg.Present(c)
+            a != null -> TextArg.Present(a)
+            else -> TextArg.Absent
+        }
+    }
+
     internal fun parseId(raw: String): WorkItemId? = (WorkItemId.of(raw) as? DomainResult.Ok)?.value
 
     internal fun parseRevision(raw: String): Revision? =

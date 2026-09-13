@@ -12,7 +12,19 @@ import java.time.Instant
 
 /** Issue d'une commande, avant toute sérialisation. */
 public sealed interface WorkActionResult {
-    public data class Done(public val outcome: WriteOutcome) : WorkActionResult
+    /**
+     * Mutation appliquée. Porte le STATUT RÉSULTANT, pas seulement la révision.
+     *
+     * Sans lui, la couche MCP devait deviner — et devinait `released` en dur,
+     * pour toute écriture. `abandon_work` annonçait donc `released` : le domaine
+     * distingue pourtant RELEASED et ABANDONED, deux états terminaux qui ne
+     * veulent pas dire la même chose. L'information existait ici, à deux lignes
+     * de la sortie, et était jetée.
+     */
+    public data class Done(
+        public val outcome: WriteOutcome,
+        public val status: coordmcp.domain.WorkStatus,
+    ) : WorkActionResult
 
     /** Le domaine a refusé — la base n'a pas été touchée. */
     public data class Refused(public val refusals: List<Refusal>) : WorkActionResult
@@ -67,13 +79,14 @@ public class WorkLifecycleUseCase(
             is DomainResult.Ok -> {
                 val next = decision.value
                 WorkActionResult.Done(
-                    writer.applyTransition(
+                    outcome = writer.applyTransition(
                         id = next.id,
                         next = next.status,
                         outcome = next.outcome,
                         at = next.updatedAt,
                         expected = expected,
                     ),
+                    status = next.status,
                 )
             }
         }
