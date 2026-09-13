@@ -58,7 +58,7 @@ class CoordinationContractParityTest {
     }
 
     private fun withClient(block: suspend (Client) -> Unit): Unit = runBlocking {
-        assumeTrue(serviceIsUp(), "service MCP absent sur $url — test de parité ignoré")
+        exigerServiceOuPasser()
         val http = HttpClient { install(SSE) }
         val client = Client(clientInfo = Implementation(name = "parity-test", version = "1"))
         try {
@@ -67,6 +67,22 @@ class CoordinationContractParityTest {
         } finally {
             client.close()
             http.close()
+        }
+    }
+
+    /**
+     * Sans service, ces tests se SAUTENT — et une suite qui se saute rend vert.
+     * C'est le motif exact qu'ils existent pour combattre : `outputSchema = null`
+     * était vert conceptuellement et faux à l'exécution.
+     *
+     * `COORD_MCP_REQUIRE_LIVE=1` transforme le saut en ÉCHEC. La CI le pose :
+     * un contrat qu'on ne vérifie pas faute de service doit être rouge, pas vert.
+     */
+    private fun exigerServiceOuPasser() {
+        if (System.getenv("COORD_MCP_REQUIRE_LIVE") == "1") {
+            kotlin.test.assertTrue(serviceIsUp(), "COORD_MCP_REQUIRE_LIVE=1 mais aucun service sur $url")
+        } else {
+            assumeTrue(serviceIsUp(), "service MCP absent sur $url — test ignoré (poser COORD_MCP_REQUIRE_LIVE=1 pour l'exiger)")
         }
     }
 

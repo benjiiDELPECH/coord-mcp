@@ -58,3 +58,44 @@ jobs:
           COORD_MCP_PG_TEST_URL: jdbc:postgresql://127.0.0.1:5432/coord_mcp_test
           COORD_MCP_DB_USER: coord
         run: gradle test detekt
+
+      # ── Contrat VIVANT ────────────────────────────────────────────────
+      # Les suites de parité se SAUTAIENT ici : sans service sur 8015, leur
+      # `assumeTrue` les rendait vertes en n'exécutant rien. Un contrôle qui
+      # se saute tout seul n'est pas un contrôle — c'est le motif exact que
+      # ces tests existent pour combattre.
+      #
+      # On démarre donc le binaire RÉEL et on exige sa présence. C'est aussi
+      # la seule façon de tester ce qui est livré : `gradle test` valide du
+      # code, pas le processus que launchd lancera.
+      - name: Distribution
+        working-directory: kotlin
+        run: gradle installDist
+
+      - name: Démarrer le service
+        env:
+          COORD_MCP_JDBC_URL: jdbc:postgresql://127.0.0.1:5432/coord_mcp_test
+          COORD_MCP_DB_USER: coord
+          COORD_MCP_TRANSPORT: http
+          COORD_MCP_PORT: "8015"
+        run: |
+          # PostgreSQL est en `trust` côté CI : le mot de passe n'est pas
+          # vérifié, mais la config exige qu'une source existe. Un fichier
+          # vide satisfait la règle sans qu'un secret entre dans le dépôt.
+          mkdir -p ~/.config/coord-mcp
+          printf '' > ~/.config/coord-mcp/db_password
+          export COORD_MCP_DB_PASSWORD_FILE=~/.config/coord-mcp/db_password
+          kotlin/build/install/coord-mcp-kotlin/bin/coord-mcp-kotlin &
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/8015) >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "service jamais monté sur 8015" >&2
+          exit 1
+
+      - name: Contrat vivant — schémas ET invariants métier
+        working-directory: kotlin
+        env:
+          COORD_MCP_REQUIRE_LIVE: "1"
+          COORD_MCP_LIVE_URL: http://127.0.0.1:8015/mcp
+        run: gradle test --tests '*Parity*' --tests '*Protocol*'

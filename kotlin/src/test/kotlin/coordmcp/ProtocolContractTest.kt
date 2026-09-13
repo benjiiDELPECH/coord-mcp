@@ -42,7 +42,11 @@ class ProtocolContractTest {
 
     @Test
     fun `un client MCP reel peut lister ET appeler un outil sans erreur de protocole`() = runBlocking {
-        assumeTrue(serviceIsUp(), "service MCP absent sur $url — test de protocole ignoré")
+        if (System.getenv("COORD_MCP_REQUIRE_LIVE") == "1") {
+            assertTrue(serviceIsUp(), "COORD_MCP_REQUIRE_LIVE=1 mais aucun service sur $url")
+        } else {
+            assumeTrue(serviceIsUp(), "service MCP absent sur $url — test de protocole ignoré")
+        }
         val http = HttpClient { install(SSE) }
         val client = Client(clientInfo = Implementation(name = "protocol-test", version = "1"))
 
