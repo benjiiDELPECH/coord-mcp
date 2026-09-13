@@ -31,6 +31,7 @@ class CoordinationTest {
         paths: List<String> = emptyList(),
         symbols: List<String> = emptyList(),
         expanded: List<String> = emptyList(),
+        resources: List<String> = emptyList(),
     ): WorkItem = WorkItem.of(
         id = (WorkItemId.of(id) as DomainResult.Ok).value,
         status = WorkStatus.DECLARED,
@@ -43,12 +44,81 @@ class CoordinationTest {
             updatedAt = at,
             symbols = symbols,
             expandedFiles = expanded,
+            resources = resources,
         ),
         revision = (Revision.of(1) as DomainResult.Ok).value,
     )
 
-    private fun candidate(paths: List<String> = emptyList(), symbols: List<String> = emptyList()) =
-        CandidateScope(paths.toSet(), symbols.toSet())
+    private fun candidate(
+        paths: List<String> = emptyList(),
+        symbols: List<String> = emptyList(),
+        resources: List<String> = emptyList(),
+    ) = CandidateScope(paths.toSet(), symbols.toSet(), resources.toSet())
+
+    // ── Conflits de RESSOURCES (troisième axe) ────────────────────────────
+
+    @Test
+    fun `une ressource partagee est detectee MEME SI fichiers et symboles different`() {
+        // L'incident : deux agents sur le problème urgent, fichiers DISJOINTS,
+        // symboles DISJOINTS — l'un crée une VM avec un label et y place des
+        // jobs par node affinity, l'autre fait autre chose. Les deux premiers
+        // axes sont verts. Seul le troisième voit le télescopage.
+        val conflicts = ConflictDetector.detect(
+            candidate(paths = listOf("infra/vm.tf"), resources = listOf("vm:ci-runner-3")),
+            listOf(
+                item(
+                    "wi_b",
+                    paths = listOf("docs/readme.md"),
+                    symbols = listOf("ToutAutre"),
+                    resources = listOf("vm:ci-runner-3"),
+                ),
+            ),
+            ConflictReason.SHARED_RESOURCE,
+        )
+        assertEquals(1, conflicts.size)
+        assertEquals(ConflictReason.SHARED_RESOURCE, conflicts[0].reason)
+        assertEquals(listOf("vm:ci-runner-3"), conflicts[0].shared)
+    }
+
+    @Test
+    fun `des ressources differentes ne produisent aucun conflit`() {
+        // Comparaison EXACTE : `vm:ci-runner-3` et `vm:ci-runner-4` sont deux
+        // ressources distinctes. Aucun faux positif — une alerte qui crie pour
+        // rien cesse d'être lue.
+        val conflicts = ConflictDetector.detect(
+            candidate(resources = listOf("vm:ci-runner-3")),
+            listOf(item("wi_b", resources = listOf("vm:ci-runner-4", "port:4000"))),
+            ConflictReason.SHARED_RESOURCE,
+        )
+        assertEquals(emptyList(), conflicts)
+    }
+
+    @Test
+    fun `detectAll rend les TROIS natures de conflit`() {
+        val conflicts = ConflictDetector.detectAll(
+            candidate(
+                paths = listOf("src/a.kt"),
+                symbols = listOf("Partage"),
+                resources = listOf("k8s-label:app=alert-immo"),
+            ),
+            listOf(
+                item(
+                    "wi_b",
+                    paths = listOf("src/b.kt", "src/a.kt"),
+                    symbols = listOf("Partage"),
+                    resources = listOf("k8s-label:app=alert-immo"),
+                ),
+            ),
+        )
+        assertEquals(
+            listOf(
+                ConflictReason.SHARED_PATH,
+                ConflictReason.SHARED_SYMBOL,
+                ConflictReason.SHARED_RESOURCE,
+            ),
+            conflicts.map { it.reason },
+        )
+    }
 
     // ── Conflits de chemins ───────────────────────────────────────────────
 

@@ -44,6 +44,7 @@ internal object JooqWorkItemMapper {
             record.githubIssueNumber,
             stringList(record.scopeSymbols),
             stringList(record.scopeSymbolsExpanded),
+            stringList(record.scopeResources),
             record.triggersCi,
         ),
             revision = revision,

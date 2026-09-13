@@ -238,6 +238,16 @@ public data class WorkItemDraft(
     public val symbols: List<String> = emptyList(),
     public val expandedFiles: List<String> = emptyList(),
     /**
+     * Ressources d'INFRASTRUCTURE que ce travail occupe : nœud, label K8s,
+     * affinité, VM, port, secret, chemin de stockage.
+     *
+     * Un troisième axe, à côté des fichiers et des symboles, parce qu'il y a un
+     * troisième angle mort : deux agents fichiers-disjoints et
+     * symboles-disjoints peuvent se télescoper sur le cluster. Aucune
+     * comparaison de dépôt ne le voit.
+     */
+    public val resources: List<String> = emptyList(),
+    /**
      * Ce travail consommera-t-il une place dans le lanceur CI partagé ?
      *
      * C'est ce booléen qui décide si la barrière de concurrence s'applique : un

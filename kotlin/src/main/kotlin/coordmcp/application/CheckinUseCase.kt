@@ -27,6 +27,12 @@ public data class CheckinCommand(
     val title: String,
     val scopeFiles: List<String>,
     val scopeSymbols: List<String>,
+    /**
+     * Ressources d'infra occupées par ce travail (nœud, label, VM, port,
+     * affinité). Défaut vide : les appelants existants restent valides, et un
+     * travail qui n'annonce rien ne prétend rien occuper.
+     */
+    val scopeResources: List<String> = emptyList(),
     val agentId: String?,
     /** `null` => détecté par règle depuis le périmètre. */
     val triggersCi: Boolean?,
@@ -66,8 +72,9 @@ public sealed interface CheckinResult {
  * CONSTATS rendus à l'appelant. Un conflit se signale, il ne se tranche pas —
  * c'est l'agent qui sait s'il a une raison de recouvrir un périmètre déjà pris.
  *
- * Deux natures de conflit sont cherchées : les CHEMINS recouverts, et les
- * SYMBOLES partagés — invisibles aux seuls chemins. Quand le résolveur de code
+ * TROIS natures de conflit sont cherchées : les CHEMINS recouverts, les
+ * SYMBOLES partagés — invisibles aux seuls chemins — et les RESSOURCES d'infra
+ * occupées, invisibles aux deux premières. Quand le résolveur de code
  * ne répond pas, on le DIT : une liste de conflits vide au motif que le résolveur
  * est muet ferait passer une absence de vérification pour une vérification
  * réussie.
@@ -104,6 +111,7 @@ public class CheckinUseCase(
 
         val paths = command.scopeFiles.map { it.trim() }.filter { it.isNotEmpty() }
         val symbols = command.scopeSymbols.map { it.trim() }.filter { it.isNotEmpty() }
+        val resources = command.scopeResources.map { it.trim() }.filter { it.isNotEmpty() }
 
         val scope = when (val r = ScopeFiles.parse(jsonArrayOf(paths))) {
             is DomainResult.Ok -> r.value
@@ -119,6 +127,7 @@ public class CheckinUseCase(
         val candidate = CandidateScope(
             paths = (paths + expandedFiles).toSet(),
             symbols = symbols.toSet(),
+            resources = resources.toSet(),
         )
 
         val conflicts = ConflictDetector.detectAll(candidate, reader.active())
@@ -136,6 +145,7 @@ public class CheckinUseCase(
                 scope = scope,
                 symbols = symbols,
                 expandedFiles = expandedFiles.toList().sorted(),
+                resources = resources,
                 agentId = command.agentId,
                 triggersCi = triggersCi,
                 at = clock(),

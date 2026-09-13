@@ -1,0 +1,12 @@
+-- 003 — périmètre de RESSOURCES (infra), à côté du périmètre de FICHIERS.
+--
+-- Motif (incident constaté) : deux agents travaillent sur le problème urgent,
+-- fichiers DISJOINTS, donc `scope_files` ne voit aucun conflit — mais l'un crée
+-- une VM avec un label et y place des jobs par node affinity, pendant que
+-- l'autre fait autre chose. Le recoupement de chemins est vert, la ressource
+-- est partagée, et l'échec est silencieux.
+--
+-- Colonne NULLABLE, sans défaut : additive, instantanée en PostgreSQL, et les
+-- lignes existantes restent valides (NULL = aucune ressource déclarée, ce qui
+-- est l'état réel des 2089 lignes antérieures).
+ALTER TABLE work_items ADD COLUMN IF NOT EXISTS scope_resources TEXT;
