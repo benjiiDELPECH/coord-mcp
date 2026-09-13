@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Journalisation sur STDERR, impérativement.
+
+  Sur un serveur MCP en transport stdio, `stdout` appartient au protocole : toute
+  ligne de log écrite là corrompt le flux JSON-RPC et le client reçoit du
+  charabia. Sans ce fichier, Logback écrit sur `stdout` par défaut — constaté le
+  2026-09-13 : 81 lignes de log sur 84 de sortie, protocole illisible.
+
+  Le niveau WARN évite par ailleurs que le SDK, très bavard en INFO, ne noie un
+  `stderr` que personne ne lit.
+-->
+<configuration>
+    <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+        <target>System.err</target>
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="WARN">
+        <appender-ref ref="STDERR"/>
+    </root>
+</configuration>

@@ -6,9 +6,8 @@
     <string>com.example.coord-mcp</string>
     <key>ProgramArguments</key>
     <array>
-        <string>__COORD_MCP_HOME__/.venv/bin/python</string>
-        <string>-m</string>
-        <string>src.server</string>
+        <string>__COORD_MCP_HOME__/kotlin/build/install/coord-mcp-kotlin/bin/coord-mcp-kotlin</string>
+        
     </array>
     <key>WorkingDirectory</key>
     <string>__COORD_MCP_HOME__</string>
@@ -27,7 +26,24 @@
         <key>HOME</key>
         <string>__HOME__</string>
         <key>PATH</key>
-        <string>__COORD_MCP_HOME__/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!--
+          Configuration OBLIGATOIRE : le service refuse de démarrer si l'une
+          manque, et nomme celles qui manquent (EX_CONFIG). Un mot de passe ne
+          figure JAMAIS ici : il est lu depuis un fichier en 0600.
+        -->
+        <key>COORD_MCP_TRANSPORT</key>
+        <string>http</string>
+        <key>COORD_MCP_PORT</key>
+        <string>8015</string>
+        <key>COORD_MCP_JDBC_URL</key>
+        <string>jdbc:postgresql://127.0.0.1:5432/coord_mcp</string>
+        <key>COORD_MCP_DB_USER</key>
+        <string>__DB_USER__</string>
+        <key>COORD_MCP_DB_PASSWORD_FILE</key>
+        <string>__HOME__/.config/coord-mcp/db_password</string>
+        <key>COORD_MCP_CI_CONCURRENCY_LIMIT</key>
+        <string>2</string>
     </dict>
 </dict>
 </plist>

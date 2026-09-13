@@ -1,0 +1,51 @@
+[versions]
+# 2.4.20 : le SDK MCP 0.15.0 dépend de kotlin-stdlib 2.4.0, que le
+# compilateur doit pouvoir lire (métadonnées incompatibles sinon).
+kotlin = "2.4.20"
+coroutines = "1.9.0"
+serialization = "1.7.3"
+arrow = "1.2.4"
+# 2.3.2 : la 2.0.2 ne suit pas Kotlin 2.2.
+kotlinx-io = "0.9.1"
+mcp = "0.15.0"
+# Version alignée sur celle que le SDK MCP tire (3.5.1) : un écart produirait
+# deux Ktor sur le classpath.
+ktor = "3.5.1"
+logback = "1.5.6"
+# jOOQ génère ses classes typées DEPUIS la base : le schéma n'est déclaré qu'une
+# fois. SQLDelight exigerait un `.sq` en plus des migrations SQL — deux
+# déclarations du même schéma, donc un risque de dérive. Cette dérive a été
+# observée pour de vrai : la base portait `triggers_ci` que le code ne
+# déclarait pas.
+jooq = "3.20.19"
+postgresql = "42.7.13"
+junit = "5.10.3"
+kotest = "5.9.1"
+detekt = "1.23.7"
+
+[libraries]
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+arrow-core = { module = "io.arrow-kt:arrow-core", version.ref = "arrow" }
+# SQLite 3.35. Sans lui, la génération refuse la requête — et l'alternative
+# (UPDATE puis SELECT) exigerait une transaction explicite pour rester correcte.
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+kotest-runner = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
+kotest-assertions = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
+kotest-property = { module = "io.kotest:kotest-property", version.ref = "kotest" }
+
+# Serveur MCP : transport officiel (stdio + Ktor streamable HTTP), pas de JSON-RPC maison.
+mcp-server = { module = "io.modelcontextprotocol:kotlin-sdk-server", version.ref = "mcp" }
+mcp-client = { module = "io.modelcontextprotocol:kotlin-sdk-client", version.ref = "mcp" }
+ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
+kotlinx-io-core = { module = "org.jetbrains.kotlinx:kotlinx-io-core", version.ref = "kotlinx-io" }
+
+jooq = { module = "org.jooq:jooq", version.ref = "jooq" }
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+ktor-server-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+detekt = { id = "io.gitlab.arturbosch.detekt", version.ref = "detekt" }

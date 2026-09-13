@@ -1,5 +1,12 @@
 name: CI
 
+# Le service est en Kotlin sur PostgreSQL. La CI qui tournait sur pytest est
+# remplacée : elle testait une implémentation qui n'est plus déployée.
+#
+# PostgreSQL est monté en `trust` et non avec un mot de passe : les tests ouvrent
+# des connexions sans secret, et un mot de passe dans un workflow est un secret
+# dans un fichier versionné — on a déjà donné.
+
 on:
   push:
     branches: [main]
@@ -9,17 +16,86 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: coord
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: coord_mcp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-java@v4
         with:
-          python-version: "3.13"
+          distribution: temurin
+          java-version: "21"
 
-      # Fresh install, no cache — this is the check that would have caught
-      # mcp 2.0.0 dropping fastmcp before it ever reached a running service.
-      - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+      - uses: gradle/actions/setup-gradle@v4
 
-      - name: Run tests
-        run: python -m pytest tests/ -v
+      # Le schéma est appliqué AVANT les tests : jOOQ génère ses types depuis la
+      # base, donc un schéma absent fait échouer la compilation, pas seulement
+      # les tests. C'est voulu — une dérive de schéma doit casser tôt.
+      - name: Schéma de test
+        run: |
+          PGPASSWORD="" psql -h 127.0.0.1 -U coord -d coord_mcp_test -v ON_ERROR_STOP=1 \
+            -f kotlin/migrations/pg/001_init.sql
+          PGPASSWORD="" psql -h 127.0.0.1 -U coord -d coord_mcp_test -v ON_ERROR_STOP=1 \
+            -f kotlin/migrations/pg/002_audit_and_adr.sql
+
+      - name: Build, tests et analyse statique
+        working-directory: kotlin
+        env:
+          COORD_MCP_PG_TEST_URL: jdbc:postgresql://127.0.0.1:5432/coord_mcp_test
+          COORD_MCP_DB_USER: coord
+        run: gradle test detekt
+
+      # ── Contrat VIVANT ────────────────────────────────────────────────
+      # Les suites de parité se SAUTAIENT ici : sans service sur 8015, leur
+      # `assumeTrue` les rendait vertes en n'exécutant rien. Un contrôle qui
+      # se saute tout seul n'est pas un contrôle — c'est le motif exact que
+      # ces tests existent pour combattre.
+      #
+      # On démarre donc le binaire RÉEL et on exige sa présence. C'est aussi
+      # la seule façon de tester ce qui est livré : `gradle test` valide du
+      # code, pas le processus que launchd lancera.
+      - name: Distribution
+        working-directory: kotlin
+        run: gradle installDist
+
+      - name: Démarrer le service
+        env:
+          COORD_MCP_JDBC_URL: jdbc:postgresql://127.0.0.1:5432/coord_mcp_test
+          COORD_MCP_DB_USER: coord
+          COORD_MCP_TRANSPORT: http
+          COORD_MCP_PORT: "8015"
+        run: |
+          # PostgreSQL est en `trust` côté CI : le mot de passe n'est pas
+          # vérifié, mais la config exige qu'une source existe. Un fichier
+          # vide satisfait la règle sans qu'un secret entre dans le dépôt.
+          mkdir -p ~/.config/coord-mcp
+          printf '' > ~/.config/coord-mcp/db_password
+          export COORD_MCP_DB_PASSWORD_FILE=~/.config/coord-mcp/db_password
+          kotlin/build/install/coord-mcp-kotlin/bin/coord-mcp-kotlin &
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/8015) >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "service jamais monté sur 8015" >&2
+          exit 1
+
+      - name: Contrat vivant — schémas ET invariants métier
+        working-directory: kotlin
+        env:
+          COORD_MCP_REQUIRE_LIVE: "1"
+          COORD_MCP_LIVE_URL: http://127.0.0.1:8015/mcp
+        run: gradle test --tests '*Parity*' --tests '*Protocol*'

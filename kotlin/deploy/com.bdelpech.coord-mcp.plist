@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  coord-mcp en Kotlin/PostgreSQL — service launchd.
+
+  REMPLACE le service Python (SQLite). Même port (8015), même chemin (/mcp),
+  mêmes noms d'outils : les agents qui pointent dessus n'ont rien à changer.
+
+  Le mot de passe NE figure PAS en clair ici : il est lu depuis un fichier en
+  0600, conformément à la conception de `CoordConfig` (COORD_MCP_DB_PASSWORD_FILE).
+  Un secret dans un plist est un secret dans un fichier lisible et sauvegardé —
+  on a déjà donné.
+
+  AVANT DE CHARGER : créer le fichier de mot de passe.
+      install -d -m 700 ~/.config/coord-mcp
+      printf '%s' '<mot-de-passe>' > ~/.config/coord-mcp/db_password
+      chmod 600 ~/.config/coord-mcp/db_password
+      # auth trust locale : un fichier vide convient
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bdelpech.coord-mcp</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/bdelpech/dev/github/coord-mcp/kotlin/build/install/coord-mcp-kotlin/bin/coord-mcp-kotlin</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/bdelpech/dev/github/coord-mcp</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>COORD_MCP_TRANSPORT</key>
+        <string>http</string>
+        <key>COORD_MCP_PORT</key>
+        <string>8015</string>
+        <key>COORD_MCP_JDBC_URL</key>
+        <string>jdbc:postgresql://127.0.0.1:5432/coord_mcp</string>
+        <key>COORD_MCP_DB_USER</key>
+        <string>bdelpech</string>
+        <key>COORD_MCP_DB_PASSWORD_FILE</key>
+        <string>/Users/bdelpech/.config/coord-mcp/db_password</string>
+        <key>COORD_MCP_CI_CONCURRENCY_LIMIT</key>
+        <string>2</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/coord-mcp.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/coord-mcp.err</string>
+</dict>
+</plist>

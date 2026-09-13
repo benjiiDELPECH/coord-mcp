@@ -1,0 +1,228 @@
+package coordmcp
+
+import io.ktor.client.HttpClient
+import io.ktor.client.plugins.sse.SSE
+import io.modelcontextprotocol.kotlin.sdk.client.Client
+import io.modelcontextprotocol.kotlin.sdk.client.StreamableHttpClientTransport
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequest
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequestParams
+import io.modelcontextprotocol.kotlin.sdk.types.Implementation
+import io.modelcontextprotocol.kotlin.sdk.types.TextContent
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlin.test.Test
+import kotlin.test.assertTrue
+import org.junit.jupiter.api.Tag
+
+/**
+ * PARITÉ Python → Kotlin — le contrat des outils de coordination.
+ *
+ * Référence : l'implémentation Python, récupérable par
+ * `git show <commit-avant-le-portage>:src/server.py`. Signatures :
+ *
+ *     get_work(work_item_id: str)
+ *     release_work(work_item_id: str)
+ *     abandon_work(work_item_id: str, reason: str = "")
+ *     relink_issue(work_item_id: str, issue_number: int, note: str = "")
+ *     list_active_work(repo_path: str | None = None) -> list[dict[str, Any]]
+ *
+ * QUATRE OUTILS, UN SEUL VOCABULAIRE : `work_item_id`.
+ *
+ * Cette suite est écrite pour ÉCHOUER sur le portage du 2026-09-13, qui a
+ * conservé les NOMS d'outils en modifiant les contrats. Trois régressions, une
+ * par niveau — syntaxique (`work_item_id` → `id`), structurel (tableau →
+ * objet refusé par le client), sémantique (`repo_path` ignoré).
+ *
+ * L'ORDRE DES TESTS EST DÉLIBÉRÉ : un simple snapshot de `tools/list` attrape
+ * deux des trois SANS aucun appel. On écrit le test le moins cher en premier,
+ * parce que `outputSchema = null` était vert conceptuellement et faux à
+ * l'exécution — un test unitaire vert n'aurait rien vu.
+ *
+ * Nécessite le service sur 8015 ; sans lui, les tests sont IGNORÉS (et non
+ * verts), sinon ils ne prouveraient rien.
+ */
+@Tag("live")
+class CoordinationContractParityTest {
+
+    private val url = System.getenv("COORD_MCP_LIVE_URL") ?: "http://127.0.0.1:8015/mcp"
+
+    /** Les outils qui prennent un identifiant. Le nom canonique Python est `work_item_id`. */
+    private val outilsAIdentifiant = listOf("get_work", "release_work", "abandon_work", "relink_issue")
+
+    private fun serviceIsUp(): Boolean = try {
+        java.net.Socket("127.0.0.1", java.net.URI(url).port).use { true }
+    } catch (_: java.io.IOException) {
+        false
+    }
+
+    private fun withClient(block: suspend (Client) -> Unit): Unit = runBlocking {
+        exigerService()
+        val http = HttpClient { install(SSE) }
+        val client = Client(clientInfo = Implementation(name = "parity-test", version = "1"))
+        try {
+            client.connect(StreamableHttpClientTransport(client = http, url = url))
+            block(client)
+        } finally {
+            client.close()
+            http.close()
+        }
+    }
+
+    /**
+     * PLUS DE BRANCHE DE SAUT.
+     *
+     * Ces tests ne vivent que dans la tâche `liveContractTest`, qui exige un
+     * service. Il n'existe donc aucun chemin où ils « passent » sans avoir
+     * vérifié : le saut a été retiré, pas conditionné.
+     *
+     * C'est la leçon du `assumeTrue` d'origine — « si je ne peux pas faire la
+     * vérification critique, considère que tout va bien » — qui était un
+     * faux vert, pas une commodité.
+     */
+    private fun exigerService() {
+        check(serviceIsUp()) {
+            "liveContractTest exige un service MCP sur $url. Un contrat non " +
+                "vérifié doit être ROUGE, pas vert."
+        }
+    }
+
+    private suspend fun Client.appeler(nom: String, args: kotlinx.serialization.json.JsonObject? = null): String {
+        val params = if (args == null) CallToolRequestParams(name = nom)
+        else CallToolRequestParams(name = nom, arguments = args)
+        val result = clientCall(params)
+        return result.content.filterIsInstance<TextContent>().firstOrNull()?.text.orEmpty()
+    }
+
+    private suspend fun Client.clientCall(params: CallToolRequestParams) =
+        callTool(CallToolRequest(params))
+
+    /** Niveau 1 — snapshot de `tools/list`. Aucun appel. Attrape la régression syntaxique. */
+    @Test
+    fun `les quatre outils prennent work_item_id, pas id`() = withClient { client ->
+        val tools = client.listTools().tools.associateBy { it.name }
+
+        for (nom in outilsAIdentifiant) {
+            val outil = tools[nom] ?: error("outil absent du serveur : $nom")
+            val props = outil.inputSchema.properties?.keys.orEmpty()
+            assertTrue(
+                "work_item_id" in props,
+                "$nom doit déclarer `work_item_id` (contrat Python). Déclaré : $props",
+            )
+            assertTrue(
+                "id" !in props,
+                "$nom déclare `id` — un SECOND vocabulaire d'identifiant a été introduit " +
+                    "à côté de `work_item_id` (CheckinTools). Déclaré : $props",
+            )
+        }
+    }
+
+    /** Niveau 1 — toujours sans appel. Attrape la régression sémantique. */
+    @Test
+    fun `list_active_work declare repo_path`() = withClient { client ->
+        val tools = client.listTools().tools.associateBy { it.name }
+        val outil = tools["list_active_work"] ?: error("outil absent : list_active_work")
+        val props = outil.inputSchema.properties?.keys.orEmpty()
+        assertTrue(
+            "repo_path" in props,
+            "list_active_work doit déclarer `repo_path` (contrat Python). Sans lui, un " +
+                "filtre DEMANDÉ disparaît en silence et rend une réponse plausible et fausse. " +
+                "Déclaré : $props",
+        )
+    }
+
+    /**
+     * Niveau 1 — le SECOND paramètre de `release_work`, et la régression que la
+     * première version de cette suite n'avait PAS attrapée.
+     *
+     * Python : `release_work(work_item_id, outcome, close_github_issue=False)`.
+     * Kotlin : `lesson` à la place d'`outcome`. Un client envoyant `outcome` —
+     * le seul nom qu'il connaisse — recevait `REFUSED: MissingLesson` : un refus
+     * d'argument déguisé en refus métier, donc illisible comme un problème de
+     * contrat.
+     *
+     * Leçon de méthode : vérifier l'identifiant ne suffit pas. Une suite de
+     * parité qui ne teste qu'UN paramètre laisse passer le renommage des autres.
+     */
+    @Test
+    fun `release_work declare outcome, le nom du contrat Python`() = withClient { client ->
+        val tools = client.listTools().tools.associateBy { it.name }
+        val outil = tools["release_work"] ?: error("outil absent : release_work")
+        val props = outil.inputSchema.properties?.keys.orEmpty()
+        assertTrue(
+            "outcome" in props,
+            "release_work doit déclarer `outcome` (contrat Python) et non `lesson`, " +
+                "qui est le nom INTERNE du domaine. Déclaré : $props",
+        )
+    }
+
+    /** Niveau 3 — appel réel. Attrape le refus d'enveloppe (-32602). */
+    @Test
+    fun `list_active_work rend un TABLEAU, pas un objet`() = withClient { client ->
+        val texte = client.appeler("list_active_work")
+        val parsed = Json.parseToJsonElement(texte)
+        assertTrue(
+            parsed is JsonArray,
+            "le contrat Python rend list[dict] ; obtenu ${parsed::class.simpleName} : ${texte.take(200)}",
+        )
+    }
+
+    /** Niveau 2 — validation d'arguments. Attrape le renommage du paramètre. */
+    @Test
+    fun `get_work lit work_item_id et ne le prend pas pour un argument absent`() = withClient { client ->
+        val texte = client.appeler(
+            "get_work",
+            buildJsonObject { put("work_item_id", "wi_000000000000") },
+        )
+        assertTrue(
+            "manquant ou invalide" !in texte,
+            "get_work a reçu `work_item_id` mais répond « manquant ou invalide » — " +
+                "le paramètre n'est pas lu sous son nom canonique. Réponse : $texte",
+        )
+    }
+
+    /**
+     * Niveau 2 — l'alias `id` SEUL.
+     *
+     * Dernier trou de la table de compatibilité. Il était vérifié à la main en
+     * JSON-RPC brut, ce qui veut dire : non protégé. Un alias qu'aucun test ne
+     * couvre est un alias qu'on peut casser sans le voir — la tolérance est une
+     * promesse de contrat, pas un détail d'implémentation.
+     */
+    @Test
+    fun `get_work accepte id seul comme alias deprecie`() = withClient { client ->
+        val texte = client.appeler(
+            "get_work",
+            buildJsonObject { put("id", "wi_000000000000") },
+        )
+        assertTrue(
+            "manquant ou invalide" !in texte,
+            "`id` seul doit être accepté comme alias DÉPRÉCIÉ de `work_item_id`. " +
+                "Réponse : $texte",
+        )
+    }
+
+    /** Niveau 2 — le cas que la compatibilité transitoire doit REFUSER.
+     *
+     * Les deux noms avec des valeurs différentes ne peuvent pas être résolus :
+     * un `?:` bien intentionné en choisirait un en silence. C'est une erreur.
+     * Les deux noms IDENTIQUES sont en revanche acceptables.
+     */
+    @Test
+    fun `les deux noms d identifiant avec des valeurs differentes sont une erreur explicite`() = withClient { client ->
+        val texte = client.appeler(
+            "get_work",
+            buildJsonObject {
+                put("work_item_id", "wi_000000000000")
+                put("id", "wi_111111111111")
+            },
+        )
+        assertTrue(
+            "manquant ou invalide" in texte || "ambigu" in texte.lowercase() || "conflit" in texte.lowercase(),
+            "deux identifiants DIFFÉRENTS doivent produire une erreur explicite, " +
+                "pas un choix silencieux. Réponse : $texte",
+        )
+    }
+}

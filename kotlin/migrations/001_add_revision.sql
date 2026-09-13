@@ -1,0 +1,22 @@
+-- Migration 001 — ajoute la clé de concurrence optimiste.
+--
+-- POURQUOI une migration explicite plutôt que l'engine SQLDelight : la base de
+-- production (~/.coord-mcp/state.db, 2090 work items) PRÉCÈDE ce module et ne
+-- porte aucun historique de versions. On l'aligne par une instruction additive
+-- documentée, appliquée volontairement, et vérifiée sur copie avant application.
+--
+-- CARACTÈRE ADDITIF, donc compatible avec le service Python encore en place :
+--   - `NOT NULL DEFAULT 1` donne la révision 1 aux 2090 lignes existantes ;
+--   - le Python fait `SELECT *` puis convertit en dictionnaire : une colonne
+--     supplémentaire y est inerte, aucun code n'y accède par position.
+--
+-- APPLICATION :
+--   cp ~/.coord-mcp/state.db /tmp/coord-backup-$(date +%Y%m%d-%H%M%S).db
+--   sqlite3 ~/.coord-mcp/state.db < kotlin/migrations/001_add_revision.sql
+--
+-- VÉRIFICATION :
+--   sqlite3 ~/.coord-mcp/state.db \
+--     "select count(*), min(revision), max(revision) from work_items;"
+--   -- attendu : 2090 | 1 | 1
+
+ALTER TABLE work_items ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
