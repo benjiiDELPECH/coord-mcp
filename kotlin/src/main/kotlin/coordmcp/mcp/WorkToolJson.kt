@@ -65,21 +65,29 @@ internal object WorkToolJson {
         WriteOutcome.NotFound -> jsonOf { put("error", "NOT_FOUND") }
     }
 
-    /** Liste des travaux non terminaux — la vue que les agents consultent le plus. */
-    internal fun activeItems(items: List<WorkItem>): String = jsonOf {
-        put("count", items.size)
-        put("items", buildJsonArray {
-            items.forEach { item ->
-                addJsonObject {
-                    put("id", item.id.value)
-                    put("status", item.status.storageValue)
-                    put("title", item.title)
-                    put("repo", item.repo.raw)
-                    put("revision", item.revision.value)
-                }
+    /**
+     * Liste des travaux non terminaux — la vue que les agents consultent le plus.
+     *
+     * Rend un TABLEAU NU, pas l'enveloppe `{count, items}`. C'est la forme du
+     * contrat Python (`list_active_work(...) -> list[dict[str, Any]]`). Le
+     * portage avait introduit l'objet, et un client qui valide la réponse contre
+     * le schéma déclaré la refuse (-32602, « data/result must be array »).
+     *
+     * Le compte reste disponible : c'est la longueur du tableau. Un champ
+     * dédié n'ajoutait rien qu'un consommateur ne puisse mesurer, et l'ajouter
+     * a suffi à rompre le contrat.
+     */
+    internal fun activeItems(items: List<WorkItem>): String = buildJsonArray {
+        items.forEach { item ->
+            addJsonObject {
+                put("id", item.id.value)
+                put("status", item.status.storageValue)
+                put("title", item.title)
+                put("repo", item.repo.raw)
+                put("revision", item.revision.value)
             }
-        })
-    }
+        }
+    }.toString()
 
     private fun jsonOf(build: JsonObjectBuilder.() -> Unit): String =
         buildJsonObject(build).toString()

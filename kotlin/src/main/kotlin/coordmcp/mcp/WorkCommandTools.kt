@@ -31,7 +31,7 @@ internal class WorkCommandTools(
                 "STALE_REVISION et RIEN n'est appliqué.",
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
-                    putJsonObject("id") { put("type", "string") }
+                    putJsonObject("work_item_id") { put("type", "string") }
                     putJsonObject("lesson") {
                         put("type", "string")
                         put(
@@ -51,9 +51,13 @@ internal class WorkCommandTools(
             outputSchema = null,
         ) { request ->
             val args = request.arguments
-            val id = McpTooling.parseId(McpTooling.arg(args, "id").orEmpty())
+            val idArg = McpTooling.workItemIdArg(args)
+            McpTooling.workItemIdError(idArg)?.let { motif ->
+                return@addTool McpTooling.text(WorkToolJson.invalidArgument(motif))
+            }
+            val id = McpTooling.parseId(McpTooling.workItemIdRaw(idArg))
                 ?: return@addTool McpTooling.text(
-                    WorkToolJson.invalidArgument("id manquant ou invalide"),
+                    WorkToolJson.invalidArgument("work_item_id illisible"),
                 )
             val lesson = McpTooling.arg(args, "lesson").orEmpty()
             val expected = when (val r = McpTooling.revisionArg(args)) {
@@ -77,7 +81,7 @@ internal class WorkCommandTools(
                 "un abandonné sans motif est indistinguable d'un perdu.",
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
-                    putJsonObject("id") { put("type", "string") }
+                    putJsonObject("work_item_id") { put("type", "string") }
                     putJsonObject("reason") { put("type", "string") }
                     putJsonObject("expectedRevision") { put("type", "integer") }
                 },
@@ -88,9 +92,13 @@ internal class WorkCommandTools(
             outputSchema = null,
         ) { request ->
             val args = request.arguments
-            val id = McpTooling.parseId(McpTooling.arg(args, "id").orEmpty())
+            val idArg = McpTooling.workItemIdArg(args)
+            McpTooling.workItemIdError(idArg)?.let { motif ->
+                return@addTool McpTooling.text(WorkToolJson.invalidArgument(motif))
+            }
+            val id = McpTooling.parseId(McpTooling.workItemIdRaw(idArg))
                 ?: return@addTool McpTooling.text(
-                    WorkToolJson.invalidArgument("id manquant ou invalide"),
+                    WorkToolJson.invalidArgument("work_item_id illisible"),
                 )
             val reason = McpTooling.arg(args, "reason").orEmpty()
             if (reason.isBlank()) {
@@ -116,7 +124,7 @@ internal class WorkCommandTools(
             description = "Rattache un numéro d'issue à un travail, sans changer son statut.",
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
-                    putJsonObject("id") { put("type", "string") }
+                    putJsonObject("work_item_id") { put("type", "string") }
                     putJsonObject("issue_number") {
                         put("type", "integer")
                         put("description", "Numéro d'issue, strictement positif.")
@@ -130,9 +138,13 @@ internal class WorkCommandTools(
             outputSchema = null,
         ) { request ->
             val args = request.arguments
-            val id = McpTooling.parseId(McpTooling.arg(args, "id").orEmpty())
+            val idArg = McpTooling.workItemIdArg(args)
+            McpTooling.workItemIdError(idArg)?.let { motif ->
+                return@addTool McpTooling.text(WorkToolJson.invalidArgument(motif))
+            }
+            val id = McpTooling.parseId(McpTooling.workItemIdRaw(idArg))
                 ?: return@addTool McpTooling.text(
-                    WorkToolJson.invalidArgument("id manquant ou invalide"),
+                    WorkToolJson.invalidArgument("work_item_id illisible"),
                 )
             val issueNumber = McpTooling.arg(args, "issue_number")?.toIntOrNull()
                 ?: return@addTool McpTooling.text(

@@ -21,6 +21,56 @@ internal object McpTooling {
     internal fun arg(arguments: Map<String, JsonElement>?, key: String): String? =
         arguments?.get(key)?.jsonPrimitive?.content
 
+    /**
+     * Identifiant de work item — résolu sous DEUX noms, sans jamais deviner.
+     *
+     * Le contrat Python nomme ce paramètre `work_item_id` sur les quatre outils
+     * concernés (`get_work`, `release_work`, `abandon_work`, `relink_issue`).
+     * Le portage Kotlin a introduit `id` dans un sous-ensemble d'entre eux et
+     * gardé `work_item_id` dans les autres : deux vocabulaires pour une même
+     * chose. Conséquence mesurée : `get_work` et `release_work` rendaient
+     * « id manquant ou invalide » à des clients qui envoyaient pourtant la
+     * valeur, sous son nom canonique.
+     *
+     * `id` reste donc accepté comme alias DÉPRÉCIÉ — mais le cas où les deux
+     * noms portent des valeurs DIFFÉRENTES est une erreur, pas un arbitrage.
+     * Un `?:` bien intentionné choisirait l'un des deux en silence, et
+     * l'opération s'appliquerait au mauvais work item sans que rien ne le dise.
+     *
+     * Ajouté À CÔTÉ de `arg`, jamais dedans : `arg` a 13 appelants directs et
+     * un impact CRITICAL (gitnexus). Le modifier exposerait des outils pour qui
+     * `id` n'a pas ce sens.
+     */
+    internal sealed interface WorkItemIdArg {
+        data object Absent : WorkItemIdArg
+        data class Present(val raw: String) : WorkItemIdArg
+        data class Ambiguous(val canonical: String, val alias: String) : WorkItemIdArg
+    }
+
+    internal fun workItemIdArg(arguments: Map<String, JsonElement>?): WorkItemIdArg {
+        val canonical = arg(arguments, "work_item_id")
+        val alias = arg(arguments, "id")
+        return when {
+            canonical != null && alias != null && canonical != alias ->
+                WorkItemIdArg.Ambiguous(canonical, alias)
+            canonical != null -> WorkItemIdArg.Present(canonical)
+            alias != null -> WorkItemIdArg.Present(alias)
+            else -> WorkItemIdArg.Absent
+        }
+    }
+
+    /** Le motif de refus, ou `null` si l'identifiant est exploitable. */
+    internal fun workItemIdError(arg: WorkItemIdArg): String? = when (arg) {
+        WorkItemIdArg.Absent -> "work_item_id manquant"
+        is WorkItemIdArg.Ambiguous ->
+            "work_item_id et id portent des valeurs differentes " +
+                "(${arg.canonical} / ${arg.alias}) : ambigu, refuse"
+        is WorkItemIdArg.Present -> null
+    }
+
+    internal fun workItemIdRaw(arg: WorkItemIdArg): String =
+        (arg as? WorkItemIdArg.Present)?.raw.orEmpty()
+
     internal fun parseId(raw: String): WorkItemId? = (WorkItemId.of(raw) as? DomainResult.Ok)?.value
 
     internal fun parseRevision(raw: String): Revision? =
@@ -58,9 +108,15 @@ internal object McpTooling {
      * être oubliée sur un outil ajouté plus tard.
      */
     internal fun text(body: String): CallToolResult {
+        // TOUT type JSON, pas seulement un objet. Le cast en `JsonObject`
+        // rendait `null` sur un TABLEAU, donc aucun contenu structuré n'était
+        // émis, et le client refusait sur `-32600: has an output schema but did
+        // not return structured content`. Or le contrat Python rend justement un
+        // tableau pour `list_active_work` (`-> list[dict[str, Any]]`) : la forme
+        // correcte de la charge utile était précisément celle que ce cast
+        // rejetait. Un `as? JsonObject` bien intentionné verrouillait le bug.
         val structured = try {
             kotlinx.serialization.json.Json.parseToJsonElement(body)
-                as? kotlinx.serialization.json.JsonObject
         } catch (_: kotlinx.serialization.SerializationException) {
             null
         }
@@ -68,6 +124,7 @@ internal object McpTooling {
         // le contenu structuré doit être encapsulé, pas posé à plat. Sans cette
         // enveloppe, le client refuse sur `-32602: data must have required
         // property 'result'` — constaté en production juste après la bascule.
+        // L'enveloppe vaut pour toute charge utile, tableau compris.
         val wrapped = structured?.let {
             kotlinx.serialization.json.buildJsonObject { put("result", it) }
         }

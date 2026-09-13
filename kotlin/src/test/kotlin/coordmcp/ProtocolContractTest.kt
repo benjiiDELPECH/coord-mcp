@@ -9,6 +9,8 @@ import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequestParams
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlin.test.Test
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -57,7 +59,17 @@ class ProtocolContractTest {
             )
             val text = result.content.filterIsInstance<TextContent>().firstOrNull()?.text.orEmpty()
             assertTrue(text.isNotBlank(), "l'outil doit rendre un contenu")
-            assertTrue(text.contains("\"count\""), "la charge utile doit être le JSON attendu : $text")
+            // Le contrat Python est un TABLEAU NU (`-> list[dict[str, Any]]`).
+            // Cette assertion exigeait auparavant la présence de `"count"` — un
+            // champ qui n'existait QUE par la déviation introduite au portage.
+            // Un test écrit contre l'implémentation plutôt que contre le contrat
+            // avait donc verrouillé la régression au lieu de la détecter : c'est
+            // le même défaut de méthode que `outputSchema = null`, vert
+            // conceptuellement et faux à l'exécution.
+            assertTrue(
+                Json.parseToJsonElement(text) is JsonArray,
+                "la charge utile doit être un tableau (contrat Python) : $text",
+            )
         } finally {
             client.close()
             http.close()
