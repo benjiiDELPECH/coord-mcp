@@ -19,6 +19,7 @@ Persistence: SQLite at ~/.coord-mcp/state.db (override via $COORD_MCP_DB).
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -51,7 +52,7 @@ mcp = FastMCP("coord-mcp", host="127.0.0.1", port=8015)
 
 
 @mcp.tool()
-def checkin(
+async def checkin(
     repo_path: str,
     title: str,
     scope_files: list[str] | None = None,
@@ -99,7 +100,8 @@ def checkin(
         `checkout_work`. Respect 'WAIT' — do not treat it as advisory-only noise; see
         ci_gate.wait_on for which work items to watch for `release_work`.
     """
-    return _checkin(
+    return await asyncio.to_thread(
+        _checkin,
         repo_path=repo_path,
         title=title,
         scope_files=scope_files,
@@ -113,26 +115,26 @@ def checkin(
 
 
 @mcp.tool()
-def claim_issue(work_item_id: str, github_issue_number: int) -> dict[str, Any]:
+async def claim_issue(work_item_id: str, github_issue_number: int) -> dict[str, Any]:
     """Bind a work item to an EXISTING GitHub issue (assigns @me on GH)."""
-    return _claim_issue(work_item_id, github_issue_number)
+    return await asyncio.to_thread(_claim_issue, work_item_id, github_issue_number)
 
 
 @mcp.tool()
-def claim_new(
+async def claim_new(
     work_item_id: str,
     body: str = "",
     labels: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a NEW GitHub issue and bind the work item to it."""
-    return _claim_new(work_item_id, body=body, labels=labels)
+    return await asyncio.to_thread(_claim_new, work_item_id, body=body, labels=labels)
 
 
 # ── Arrival gate ─────────────────────────────────────────────────────
 
 
 @mcp.tool()
-def checkout_work(
+async def checkout_work(
     work_item_id: str,
     diff_files: list[str] | None = None,
     auto_detect_diff: bool = True,
@@ -171,7 +173,8 @@ def checkout_work(
     repos with a stale GitHub `origin` mirror). Override via git config
     `coord-mcp.canonical-remote` or the `COORD_MCP_REFERENCE_REMOTE` env var.
     """
-    return checkout(
+    return await asyncio.to_thread(
+        checkout,
         work_item_id,
         diff_files=diff_files,
         auto_detect_diff=auto_detect_diff,
@@ -180,48 +183,50 @@ def checkout_work(
 
 
 @mcp.tool()
-def release_work(
+async def release_work(
     work_item_id: str,
     outcome: str,
     close_github_issue: bool = False,
 ) -> dict[str, Any]:
     """Finalize a work item. Stores outcome, optionally closes the GH issue with comment."""
-    return release(work_item_id, outcome=outcome, close_github_issue=close_github_issue)
+    return await asyncio.to_thread(
+        release, work_item_id, outcome=outcome, close_github_issue=close_github_issue
+    )
 
 
 @mcp.tool()
-def abandon_work(work_item_id: str, reason: str = "") -> dict[str, Any]:
+async def abandon_work(work_item_id: str, reason: str = "") -> dict[str, Any]:
     """Mark a declared/claimed work item as abandoned (e.g. user changed mind)."""
-    return abandon(work_item_id, reason=reason)
+    return await asyncio.to_thread(abandon, work_item_id, reason=reason)
 
 
 @mcp.tool()
-def relink_issue(work_item_id: str, issue_number: int, note: str = "") -> dict[str, Any]:
+async def relink_issue(work_item_id: str, issue_number: int, note: str = "") -> dict[str, Any]:
     """Repoint a work item's issue_number without touching status or calling gh.
 
     For platform migrations (e.g. GitHub -> Forgejo, 04.08.2026) where the issue
     content already exists elsewhere under a new number.
     """
-    return _relink_issue(work_item_id, issue_number, note=note)
+    return await asyncio.to_thread(_relink_issue, work_item_id, issue_number, note=note)
 
 
 # ── Visibility ───────────────────────────────────────────────────────
 
 
 @mcp.tool()
-def list_active_work(repo_path: str | None = None) -> list[dict[str, Any]]:
+async def list_active_work(repo_path: str | None = None) -> list[dict[str, Any]]:
     """List every work item NOT in terminal status. Cross-repo by default."""
-    return _list_active_work(repo_path=repo_path)
+    return await asyncio.to_thread(_list_active_work, repo_path=repo_path)
 
 
 @mcp.tool()
-def get_work(work_item_id: str) -> dict[str, Any] | None:
+async def get_work(work_item_id: str) -> dict[str, Any] | None:
     """Fetch a single work item's full record."""
-    return get_work_item(work_item_id)
+    return await asyncio.to_thread(get_work_item, work_item_id)
 
 
 @mcp.tool()
-def plan_parallel_waves(repo_path: str) -> dict[str, Any]:
+async def plan_parallel_waves(repo_path: str) -> dict[str, Any]:
     """Partition every active work item into the minimum number of conflict-free waves.
 
     Greedy graph coloring on scope overlap (declared scope_files ∪ GitNexus-expanded
@@ -229,14 +234,14 @@ def plan_parallel_waves(repo_path: str) -> dict[str, Any]:
     run fully in parallel; items in different waves must be sequenced. Answers
     "how many agents can I actually run at once right now" for a given repo.
     """
-    return _plan_parallel_waves(repo_path=repo_path)
+    return await asyncio.to_thread(_plan_parallel_waves, repo_path=repo_path)
 
 
 # ── ADR registry ─────────────────────────────────────────────────────
 
 
 @mcp.tool()
-def claim_adr_number(
+async def claim_adr_number(
     repo_path: str,
     topic: str,
     work_item_id: str | None = None,
@@ -251,7 +256,8 @@ def claim_adr_number(
 
     Returns: adr_number, filename, file_path, slug, created_skeleton, repo, topic.
     """
-    return claim_adr(
+    return await asyncio.to_thread(
+        claim_adr,
         repo_path=repo_path,
         topic=topic,
         work_item_id=work_item_id,
@@ -261,22 +267,26 @@ def claim_adr_number(
 
 
 @mcp.tool()
-def list_adr_allocations(repo_path: str | None = None) -> list[dict[str, Any]]:
+async def list_adr_allocations(repo_path: str | None = None) -> list[dict[str, Any]]:
     """Show all ADR allocations known to coord-mcp. Filter by repo if given."""
-    return list_allocations(repo_path=repo_path)
+    return await asyncio.to_thread(list_allocations, repo_path=repo_path)
 
 
 # ── Audit ────────────────────────────────────────────────────────────
 
 
-@mcp.tool()
-def audit_tail(limit: int = 20) -> list[dict[str, Any]]:
-    """Return the last N audit log entries (most recent first)."""
+def _audit_tail_sync(limit: int) -> list[dict[str, Any]]:
     with connection() as conn:
         rows = conn.execute(
             "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+@mcp.tool()
+async def audit_tail(limit: int = 20) -> list[dict[str, Any]]:
+    """Return the last N audit log entries (most recent first)."""
+    return await asyncio.to_thread(_audit_tail_sync, limit)
 
 
 # ── Entry point ──────────────────────────────────────────────────────
