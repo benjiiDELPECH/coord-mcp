@@ -1,8 +1,19 @@
+# Python (historique — l'implémentation a été portée en Kotlin le 2026-09-13)
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# SQLite (historique — la base de production est désormais PostgreSQL)
 state.db
 state.db-journal
 state.db-wal
 state.db-shm
+
+# ── Gradle ───────────────────────────────────────────────────────────────
+# `build/` contient 35 Mo d'artefacts (classes, jars, rapports) : sans ces
+# règles, un `git add -A` les committerait tous — 591 fichiers.
+# `gradle/` n'est PAS ignoré : il porte le catalogue de versions
+# (`gradle/libs.versions.toml`), qui fait partie de la source.
+build/
+.gradle/

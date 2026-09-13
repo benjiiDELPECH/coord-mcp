@@ -1,0 +1,41 @@
+# Detekt — complète le compilateur sur ce que les types ne couvrent pas.
+build:
+  maxIssues: 0
+
+complexity:
+  LongParameterList:
+    active: true
+    functionThreshold: 8
+  TooManyFunctions:
+    active: true
+    thresholdInFiles: 20
+
+style:
+  MagicNumber:
+    active: true
+    ignoreNumbers: ['-1', '0', '1', '2']
+  MaxLineLength:
+    active: true
+    maxLineLength: 120
+  ReturnCount:
+    active: true
+    max: 4
+    # Les gardes en début de fonction (`?: return`) sont l'alternative idiomatique
+    # à l'imbrication en Kotlin. Detekt expose cette option précisément pour ça :
+    # ce n'est pas un assouplissement, c'est la configuration prévue.
+    excludeGuardClauses: true
+
+exceptions:
+  # Un `catch` qui avale une erreur est interdit : c'est le défaut qui a rendu
+  # trois contrôles verts et inopérants (le `.gitignore` inopérant, le pre-push
+  # qui ne voyait rien, l'auto-capture qui larguait des commits en silence).
+  SwallowedException:
+    active: true
+  TooGenericExceptionCaught:
+    active: true
+  TooGenericExceptionThrown:
+    active: true
+
+coroutines:
+  GlobalCoroutineUsage:
+    active: true

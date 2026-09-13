@@ -99,4 +99,4 @@ This project is indexed by GitNexus as **coord-mcp** (170 symbols, 318 relations
   sur un work item qui déclenche réellement une CI lourde — ça reproduit
   exactement l'incident du 26.08.
 
-Voir tests : `tests/test_ci_concurrency.py`.
+Voir tests : `kotlin/src/test/kotlin/coordmcp/PostgresCheckoutTest.kt`.
