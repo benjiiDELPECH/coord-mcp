@@ -49,6 +49,8 @@ public data class NewWorkItem(
     public val issueNumber: Int? = null,
     public val symbols: List<String> = emptyList(),
     public val expandedFiles: List<String> = emptyList(),
+    /** Ressources d'infra occupées : troisième axe de périmètre, cf. CandidateScope. */
+    public val resources: List<String> = emptyList(),
     public val agentId: String?,
     public val triggersCi: Boolean,
     public val at: Instant,

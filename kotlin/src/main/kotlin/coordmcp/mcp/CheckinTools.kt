@@ -44,6 +44,17 @@ internal class CheckinTools(
                         put("type", "array")
                         put("description", "Symboles touchés — révèlent les conflits invisibles aux seuls chemins.")
                     }
+                    putJsonObject("scope_resources") {
+                        put("type", "array")
+                        put(
+                            "description",
+                            "Ressources d'INFRA occupées : nœud, label K8s, affinité, VM, port, " +
+                                "secret, chemin de stockage. Forme libre (ex. `vm:ci-runner-3`, " +
+                                "`k8s-label:app=alert-immo`, `port:4000`), comparée à l'identique. " +
+                                "Deux agents peuvent être disjoints en fichiers ET en symboles et " +
+                                "se télescoper sur le cluster — sans ce champ, ce conflit est invisible.",
+                        )
+                    }
                     putJsonObject("agent_id") { put("type", "string") }
                     putJsonObject("triggers_ci") {
                         put("type", "boolean")
@@ -63,6 +74,7 @@ internal class CheckinTools(
                     title = McpTooling.arg(args, "title").orEmpty(),
                     scopeFiles = stringList(args, "scope_files"),
                     scopeSymbols = stringList(args, "scope_symbols"),
+                    scopeResources = stringList(args, "scope_resources"),
                     agentId = McpTooling.arg(args, "agent_id"),
                     triggersCi = boolOrNull(args, "triggers_ci"),
                 ),

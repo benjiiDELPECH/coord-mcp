@@ -9,7 +9,7 @@ package coordmcp.domain
  * évoluer sans risquer de casser la persistance.
  */
 
-public enum class ConflictReason { SHARED_PATH, SHARED_SYMBOL }
+public enum class ConflictReason { SHARED_PATH, SHARED_SYMBOL, SHARED_RESOURCE }
 
 public data class Conflict(
     val workItemId: WorkItemId,
@@ -17,10 +17,27 @@ public data class Conflict(
     val shared: List<String>,
 )
 
-/** Périmètre candidat : chemins déclarés, symboles déclarés, fichiers étendus. */
+/** Périmètre candidat : chemins déclarés, symboles déclarés, fichiers étendus, RESSOURCES. */
 public data class CandidateScope(
     val paths: Set<String>,
     val symbols: Set<String>,
+    /**
+     * Ressources d'INFRASTRUCTURE partagées : nœuds, labels, affinités, VMs,
+     * ports, secrets, chemins de stockage.
+     *
+     * Motif de l'incident : deux agents travaillent sur le problème urgent,
+     * fichiers DISJOINTS — donc `scope_files` est vert — mais l'un crée une VM
+     * avec un label et y place des jobs par node affinity pendant que l'autre
+     * fait autre chose. Le recoupement de chemins ne voit rien parce que la
+     * collision n'est pas dans le dépôt : elle est dans le CLUSTER.
+     *
+     * Forme libre et volontairement non normalisée (`vm:ci-runner-3`,
+     * `k8s-label:app=alert-immo`, `port:4000`) : inventer une nomenclature
+     * maintenant ferait échouer des déclarations légitimes sur la casse d'un
+     * préfixe. La comparaison est exacte, donc conservatrice — elle ne
+     * signale que ce qui est identique au caractère près, sans faux positif.
+     */
+    val resources: Set<String> = emptySet(),
 )
 
 public object ConflictDetector {
@@ -28,13 +45,11 @@ public object ConflictDetector {
     /**
      * Recouvrement de périmètre avec les travaux actifs.
      *
-     * DEUX comparaisons, pas une. Deux agents peuvent éditer des fichiers
-     * différents et partager le MÊME symbole — le conflit est alors invisible au
-     * recoupement de chemins, et c'est précisément celui qui casse en silence.
-     *
-     * Les fichiers étendus d'un item actif comptent aussi : c'est ce que le
-     * résolveur de code a déduit de ses symboles, donc du périmètre réellement
-     * touché, pas seulement déclaré.
+     * TROIS comparaisons, pas une. Deux agents peuvent éditer des fichiers
+     * différents et partager le MÊME symbole — invisible au recoupement de
+     * chemins. Et deux agents peuvent être disjoints en fichiers ET en symboles
+     * tout en se télescopant sur une ressource du cluster — invisible aux deux
+     * premières. Chaque ajout ferme un angle mort qui a réellement coûté.
      */
     public fun detect(candidate: CandidateScope, active: List<WorkItem>, reason: ConflictReason): List<Conflict> {
         if (reason == ConflictReason.SHARED_PATH) {
@@ -43,6 +58,16 @@ public object ConflictDetector {
                 .mapNotNull { item ->
                     val itsPaths = item.scope.paths.toSet() + item.draft.expandedFiles
                     val shared = itsPaths.intersect(candidate.paths).sorted()
+                    if (shared.isEmpty()) null else Conflict(item.id, reason, shared)
+                }
+                .sortedBy { it.workItemId.value }
+        }
+
+        if (reason == ConflictReason.SHARED_RESOURCE) {
+            if (candidate.resources.isEmpty()) return emptyList()
+            return active
+                .mapNotNull { item ->
+                    val shared = item.draft.resources.toSet().intersect(candidate.resources).sorted()
                     if (shared.isEmpty()) null else Conflict(item.id, reason, shared)
                 }
                 .sortedBy { it.workItemId.value }
@@ -57,10 +82,11 @@ public object ConflictDetector {
             .sortedBy { it.workItemId.value }
     }
 
-    /** Conflits de chemins ET de symboles, chemins d'abord (plus lisibles). */
+    /** Chemins, symboles ET ressources — les plus lisibles d'abord. */
     public fun detectAll(candidate: CandidateScope, active: List<WorkItem>): List<Conflict> =
         detect(candidate, active, ConflictReason.SHARED_PATH) +
-            detect(candidate, active, ConflictReason.SHARED_SYMBOL)
+            detect(candidate, active, ConflictReason.SHARED_SYMBOL) +
+            detect(candidate, active, ConflictReason.SHARED_RESOURCE)
 }
 
 public sealed interface CiGateDecision {
